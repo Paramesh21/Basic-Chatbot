@@ -13,7 +13,7 @@ langchain-huggingface==0.0.3
 langchainhub==0.1.18  # <-- CRITICAL FIX: For the ReAct agent
 
 # RAG & Document Processing
-faiss-cpu==1.8.0
+chromadb==0.5.4
 sentence-transformers==2.7.0
 pypdf==4.2.0
 unstructured
