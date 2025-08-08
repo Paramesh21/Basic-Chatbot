@@ -11,7 +11,7 @@ def get_vector_store(file_path: str, chunk_size: int, chunk_overlap: int, embedd
     file_extension = os.path.splitext(file_path)[1].lower()
 
     if file_extension not in SUPPORTED_EXTENSIONS:
-        raise ValueError(f"Unsupported file type: '{file_extension}'. Supported types: {SUPPORTED_EXTENSIONS}")
+        raise ValueError(f"Unsupported file type: '{file_extension}'.")
 
     try:
         if file_extension == ".pdf":
@@ -21,12 +21,12 @@ def get_vector_store(file_path: str, chunk_size: int, chunk_overlap: int, embedd
 
         documents = loader.load()
         if not documents:
-            raise ValueError(f"No content loaded from '{os.path.basename(file_path)}'. Ensure the file is valid and not empty.")
+            raise ValueError(f"No content loaded from '{os.path.basename(file_path)}'.")
 
         text_splitter = RecursiveCharacterTextSplitter(chunk_size=chunk_size, chunk_overlap=chunk_overlap)
         chunks = text_splitter.split_documents(documents)
 
-        # Use Chroma instead of FAISS
+        # FIX: Ensure Chroma runs in a stable, in-memory mode
         return Chroma.from_documents(documents=chunks, embedding=embeddings)
 
     except Exception as e:
@@ -34,6 +34,9 @@ def get_vector_store(file_path: str, chunk_size: int, chunk_overlap: int, embedd
 
 def format_docs_with_sources(docs: list) -> str:
     """Formats retrieved documents, including source metadata."""
+    if not docs:
+        return "No relevant content found in the document for this query."
+        
     formatted_docs = []
     for i, doc in enumerate(docs):
         source = doc.metadata.get("source", "Unknown")
