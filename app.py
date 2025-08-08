@@ -113,7 +113,6 @@ def render_sidebar():
         provider_options = [f"{p} {'✅' if details['key'] else '❌'}" for p, details in PROVIDER_MAP.items()]
         selected_option = st.selectbox("LLM Provider", provider_options)
 
-        # FIX: Correctly parse the provider name from the selected option
         provider = ""
         for p_key in PROVIDER_MAP.keys():
             if selected_option.startswith(p_key):
@@ -139,7 +138,6 @@ def render_sidebar():
         st.divider()
         if st.button("🗑️ Clear Chat History", use_container_width=True, type="primary"):
             st.session_state.messages = []
-            # Clear relevant session state to allow for new file processing
             keys_to_clear = ["vector_store", "uploaded_file_path", "uploaded_file_hash"]
             for key in keys_to_clear:
                 if key in st.session_state:
@@ -164,32 +162,24 @@ def text_to_speech(text):
 
 # --- Main App Logic ---
 def main():
-    st.title("🤖 Basic Chatbot") # FIX: Renamed the chatbot
+    st.title("🤖 Basic Chatbot")
     st.session_state.setdefault("messages", [])
 
-    # Render sidebar and get settings
     uploaded_file, chunk_size, chunk_overlap, provider, model_name, temperature, response_mode = render_sidebar()
 
-    # Process uploaded file if it's new
     if uploaded_file:
         file_content = uploaded_file.getvalue()
         file_hash = hashlib.md5(file_content).hexdigest()
-        # Check if this is a new file
         if st.session_state.get("uploaded_file_hash") != file_hash:
             with st.spinner("📄 Processing document... Please wait."):
-                temp_dir = "temp_files"
-                os.makedirs(temp_dir, exist_ok=True)
+                temp_dir = "temp_files"; os.makedirs(temp_dir, exist_ok=True)
                 temp_path = os.path.join(temp_dir, uploaded_file.name)
-                with open(temp_path, "wb") as f:
-                    f.write(file_content)
-
+                with open(temp_path, "wb") as f: f.write(file_content)
                 st.session_state.uploaded_file_path = temp_path
                 st.session_state.uploaded_file_hash = file_hash
-                # Trigger the cached function to run and store the result
                 st.session_state.vector_store = create_vector_store_cached(file_hash, chunk_size, chunk_overlap)
             st.success("Document processed successfully!")
 
-    # Display initial message or chat history
     if not st.session_state.messages:
         st.info("Welcome! Ask a general question or upload a document to query its content.")
 
@@ -198,7 +188,6 @@ def main():
         with st.chat_message(role):
             st.markdown(msg.content)
 
-    # Handle new user input
     if prompt := st.chat_input("Ask your question here..."):
         st.session_state.messages.append(HumanMessage(content=prompt))
         st.chat_message("user").markdown(prompt)
@@ -206,55 +195,41 @@ def main():
         with st.chat_message("assistant"):
             if not st.session_state.get("vector_store"):
                 st.warning("Please upload a document to use the document search feature.")
-                # Allow general conversation even without a file
 
-            # Centralized block for robust error handling
             output = ""
             try:
                 with st.spinner("🧠 Thinking..."):
-                    # Get model; this will fail gracefully if the key is missing
                     chat_model = get_llm_model(provider, model_name, temperature=temperature)
 
-                    # Use a dummy retriever if no document is uploaded
                     vector_store = st.session_state.get("vector_store")
                     if not vector_store:
                         from langchain_core.retrievers import BaseRetriever
-                        from langchain_core.documents import Document
                         class DummyRetriever(BaseRetriever):
                             def _get_relevant_documents(self, query): return []
                         vector_store = type('obj', (object,), {'as_retriever': DummyRetriever})()
 
                     agent_executor = create_agent(chat_model, vector_store, response_mode)
-
-                    # Invoke agent
-                    response = agent_executor.invoke({
-                        "input": prompt,
-                        "chat_history": st.session_state.messages[-10:]
-                    })
+                    response = agent_executor.invoke({"input": prompt, "chat_history": st.session_state.messages[-10:]})
                     output = response.get("output", "I encountered an issue. Please try again.")
                     st.markdown(output)
 
-                    # Generate and play audio if enabled
                     if st.session_state.get("tts_enabled"):
                         audio_bytes = text_to_speech(output)
                         if audio_bytes:
                             st.audio(audio_bytes, format="audio/mp3")
 
-                    # Display sources if available
                     if response.get("intermediate_steps"):
                         with st.expander("🔍 View Sources", expanded=False):
                             for i, (agent_action, result) in enumerate(response["intermediate_steps"]):
-                                # FIX: Removed the unsupported 'key' argument from st.info
                                 st.info(f"**Tool Used:** `{agent_action.tool}`")
                                 if agent_action.tool == "document_search":
                                     st.text_area("Retrieved Document Content:", value=format_docs_with_sources(result), height=200, disabled=True, key=f"doc_source_{i}")
-                                else: # Web search result
-                                    st.json(result, key=f"web_source_{i}")
+                                else:
+                                    # FIX: Removed the unsupported 'key' argument from st.json
+                                    st.json(result)
                 
-                # Append successful response to history
                 st.session_state.messages.append(AIMessage(content=output))
 
-            # FIX: Specific handling for API quota/rate limit errors
             except (GroqRateLimitError, OpenAIRateLimitError, ResourceExhausted) as e:
                 error_message = f"⚠️ **API Quota Exceeded:** The `{provider}` API has reached its rate limit. Please check your plan, wait a moment, or try another provider."
                 logging.error(f"Quota Error for {provider}: {e}")
