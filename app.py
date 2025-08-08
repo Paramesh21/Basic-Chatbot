@@ -7,7 +7,6 @@ st.set_page_config(page_title="Basic Chatbot", page_icon="🤖", layout="wide")
 # --- Standard Imports ---
 import os
 import sys
-import uuid
 import logging
 import hashlib
 from io import BytesIO
@@ -34,6 +33,7 @@ from langchain_community.tools.tavily_search import TavilySearchResults
 from langchain.tools import Tool
 from gtts import gTTS
 from langchain import hub
+# Import specific error types for graceful handling
 from openai import RateLimitError as OpenAIRateLimitError
 from google.api_core.exceptions import ResourceExhausted
 from groq import RateLimitError as GroqRateLimitError
@@ -83,7 +83,6 @@ def create_agent(chat_model, vector_store, response_mode):
     prompt = hub.pull("hwchase17/react")
 
     # --- Document-First Logic ---
-    # This instruction forces the agent to prioritize the user's document.
     document_first_instruction = (
         "You MUST prioritize the `document_search` tool. First, use this tool to search the user's uploaded document. "
         "Analyze the results from the document search. If the information is sufficient to answer the user's question, "
@@ -97,7 +96,6 @@ def create_agent(chat_model, vector_store, response_mode):
         else "Respond concisely, ideally in 3 sentences or less."
     )
     
-    # Combine all instructions
     final_instructions = f"{document_first_instruction}\n\nRESPONSE STYLE: {mode_instructions}"
     prompt.template = prompt.template.replace("{agent_scratchpad}", f"{final_instructions}\n\n{{agent_scratchpad}}")
     
@@ -110,7 +108,7 @@ def create_agent(chat_model, vector_store, response_mode):
         handle_parsing_errors=True,
     )
 
-# --- Sidebar / Settings ---
+# --- UI Rendering ---
 def render_sidebar():
     with st.sidebar:
         st.header("⚙️ Settings")
@@ -132,12 +130,6 @@ def render_sidebar():
             label_visibility="collapsed"
         )
         
-        if uploaded_file:
-            st.info(f"**Name:** `{uploaded_file.name}`\n\n**Size:** `{uploaded_file.size / 1024:.2f} KB`")
-            if uploaded_file.type == "text/plain":
-                preview = uploaded_file.getvalue().decode("utf-8", errors="ignore").splitlines()
-                st.text_area("Preview", "\n".join(preview[:10]), height=120, disabled=True)
-                
         with st.expander("RAG Configuration"):
             chunk_size = st.slider("Chunk Size", 500, 2000, 1000)
             chunk_overlap = st.slider("Chunk Overlap", 0, 500, 200)
@@ -157,7 +149,7 @@ def render_sidebar():
             
         return uploaded_file, chunk_size, chunk_overlap, provider, model_name, temperature, response_mode
 
-# --- Text-to-Speech ---
+# --- Helper Functions ---
 def text_to_speech(text):
     try:
         tts = gTTS(text=text, lang='en')
@@ -169,100 +161,82 @@ def text_to_speech(text):
         st.warning("Voice output unavailable.")
         return None
 
+def handle_chat_interaction(prompt, provider, model, temp, mode):
+    with st.chat_message("assistant"):
+        output = ""
+        try:
+            with st.spinner("🧠 Thinking..."):
+                chat_model = get_llm_model(provider, model, temperature=temp)
+                vector_store = st.session_state.get("vector_store")
+                if not vector_store:
+                    from langchain_core.retrievers import BaseRetriever
+                    class DummyRetriever(BaseRetriever):
+                        def _get_relevant_documents(self, query): return []
+                    vector_store = type('obj', (object,), {'as_retriever': DummyRetriever})()
+                
+                agent_executor = create_agent(chat_model, vector_store, mode)
+                response = agent_executor.invoke({
+                    "input": prompt,
+                    "chat_history": st.session_state["messages"][-10:]
+                })
+                output = response.get("output", "Sorry, I couldn't answer that.")
+                st.markdown(output)
+
+                if st.session_state.get("tts_enabled"):
+                    audio_bytes = text_to_speech(output)
+                    if audio_bytes:
+                        st.audio(audio_bytes, format="audio/mp3")
+                
+                if response.get("intermediate_steps"):
+                    with st.expander("🔍 View Sources", expanded=False):
+                        for i, (agent_action, result) in enumerate(response["intermediate_steps"]):
+                            st.info(f"**Tool Used:** `{agent_action.tool}`")
+                            if isinstance(result, (dict, list)):
+                                st.json(result)
+                            else:
+                                st.text_area("Retrieved Content:", value=str(result), height=150, key=f"source_text_{i}")
+            
+            st.session_state.messages.append(AIMessage(content=output))
+        except (GroqRateLimitError, OpenAIRateLimitError, ResourceExhausted) as e:
+            error_message = f"⚠️ API Quota Exceeded for {provider}: {e}"
+            st.error(error_message)
+            st.session_state.messages.append(AIMessage(content=error_message))
+        except Exception as e:
+            error_message = f"An unexpected error occurred: {e}"
+            st.error(error_message)
+            st.session_state.messages.append(AIMessage(content=error_message))
+
 # --- Main App Logic ---
 def main():
     st.title("🤖 Basic Chatbot")
-    uploaded_file, chunk_size, chunk_overlap, provider, model_name, temperature, response_mode = render_sidebar()
+    uploaded_file, chunk_size, chunk_overlap, provider, model, temp, mode = render_sidebar()
 
-    # --- File Upload & Vector Store (RAG) ---
     if uploaded_file:
-        if uploaded_file.size > 15 * 1024 * 1024: # 15MB limit
-            st.error("File too large (limit: 15MB).")
-            st.stop()
-            
-        file_content = uploaded_file.getvalue()
-        file_hash = hashlib.md5(file_content).hexdigest()
-        
-        if st.session_state.get("uploaded_file_hash") != file_hash:
+        if st.session_state.get("uploaded_file_hash") != hashlib.md5(uploaded_file.getvalue()).hexdigest():
             with st.spinner("📄 Processing document..."):
                 with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(uploaded_file.name)[-1]) as tmp:
-                    tmp.write(file_content)
+                    tmp.write(uploaded_file.getvalue())
                     st.session_state.uploaded_file_path = tmp.name
                 
-                st.session_state.uploaded_file_hash = file_hash
-                vec_store = create_vector_store_cached(file_hash, chunk_size, chunk_overlap, st.session_state.uploaded_file_path)
+                st.session_state.uploaded_file_hash = hashlib.md5(uploaded_file.getvalue()).hexdigest()
+                st.session_state.vector_store = create_vector_store_cached(st.session_state.uploaded_file_hash, chunk_size, chunk_overlap, st.session_state.uploaded_file_path)
                 
-                if vec_store is None:
+                if st.session_state.vector_store is None:
                     st.error("Failed to process file. Try a different document.")
                     return
-                st.session_state.vector_store = vec_store
-            st.success("Document processed!")
+                st.success("Document processed!")
 
-    # --- Welcome message ---
-    if not st.session_state["messages"]:
+    if not st.session_state.messages:
         st.info("Welcome! Ask a question or upload a document for RAG.")
 
-    # --- Message Display ---
-    for msg in st.session_state["messages"]:
+    for msg in st.session_state.messages:
         with st.chat_message("user" if isinstance(msg, HumanMessage) else "assistant"):
             st.markdown(msg.content)
 
-    # --- Provider Key Check ---
-    is_provider_ready = PROVIDER_MAP.get(provider, {}).get("key")
-    if not is_provider_ready:
-        st.warning(f"The selected provider '{provider}' is missing an API key.")
-        st.chat_input(f"Please configure the '{provider}' API key to chat.", disabled=True)
-        st.stop()
-    
-    # --- Chat Input & Agent Invocation ---
     if prompt := st.chat_input("Ask your question here..."):
         st.session_state.messages.append(HumanMessage(content=prompt))
         st.chat_message("user").markdown(prompt)
-        
-        with st.chat_message("assistant"):
-            output = ""
-            try:
-                with st.spinner("🧠 Thinking..."):
-                    chat_model = get_llm_model(provider, model_name, temperature=temperature)
-                    vector_store = st.session_state.get("vector_store")
-                    if not vector_store:
-                        from langchain_core.retrievers import BaseRetriever
-                        class DummyRetriever(BaseRetriever):
-                            def _get_relevant_documents(self, query): return []
-                        vector_store = type('obj', (object,), {'as_retriever': DummyRetriever})()
-                    
-                    agent_executor = create_agent(chat_model, vector_store, response_mode)
-                    response = agent_executor.invoke({
-                        "input": prompt,
-                        "chat_history": st.session_state["messages"][-10:]
-                    })
-                    output = response.get("output", "Sorry, I couldn't answer that.")
-                    st.markdown(output)
-
-                    if st.session_state.get("tts_enabled"):
-                        audio_bytes = text_to_speech(output)
-                        if audio_bytes:
-                            st.audio(audio_bytes, format="audio/mp3")
-                    
-                    if response.get("intermediate_steps"):
-                        with st.expander("🔍 View Sources", expanded=False):
-                            for i, (agent_action, result) in enumerate(response["intermediate_steps"]):
-                                st.info(f"**Tool Used:** `{agent_action.tool}`")
-                                # FIX: Only call st.json on dicts/lists
-                                if isinstance(result, (dict, list)):
-                                    st.json(result) # Key removed here
-                                else:
-                                    st.text_area("Retrieved Content:", value=str(result), height=150, key=f"source_text_{i}")
-                
-                st.session_state.messages.append(AIMessage(content=output))
-            except (GroqRateLimitError, OpenAIRateLimitError, ResourceExhausted) as e:
-                error_message = f"⚠️ API Quota Exceeded for {provider}: {e}"
-                st.error(error_message)
-                st.session_state.messages.append(AIMessage(content=error_message))
-            except Exception as e:
-                error_message = f"An unexpected error occurred: {e}"
-                st.error(error_message)
-                st.session_state.messages.append(AIMessage(content=error_message))
+        handle_chat_interaction(prompt, provider, model, temp, mode)
 
 if __name__ == "__main__":
     main()
