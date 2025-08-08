@@ -8,7 +8,7 @@ langchain-community==0.2.0
 langchain-core==0.2.1
 langchain-groq==0.1.5
 langchain-openai==0.1.7
-langchain-google-genai==0.1.5
+langchain-google-genai==1.0.5
 langchain-huggingface==0.0.3
 langchainhub==0.1.18
 
@@ -16,7 +16,7 @@ langchainhub==0.1.18
 chromadb==0.5.4
 sentence-transformers==2.7.0
 pypdf==4.2.0
-unstructured
+unstructured==0.14.4
 nltk==3.8.1
 
 # Tools & Utilities
