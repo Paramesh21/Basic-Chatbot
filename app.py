@@ -14,8 +14,7 @@ from gtts import gTTS
 
 # --- Local Project Imports ---
 from config.config import TAVILY_API_KEY
-from models.llm import PROVIDER_MAP
-from models.llm import get_llm
+from models.llm import PROVIDER_MAP, get_llm
 from models.embeddings import get_embedding_model
 from utils.rag_utils import create_vector_store_from_upload
 
@@ -30,11 +29,8 @@ def load_embedding_model():
     """Loads the embedding model and caches it."""
     return get_embedding_model()
 
-# THE FIX: Removed the conflicting @st.cache_data decorator from this function.
-# The app already uses st.session_state for caching the processed document,
-# which is the correct way to handle complex objects like file uploads.
 def process_document(_file, embeddings):
-    """Processes the uploaded document and creates a cached vector store."""
+    """Processes the uploaded document and creates a vector store."""
     return create_vector_store_from_upload(_file, embeddings)
 
 
@@ -52,10 +48,15 @@ def create_rag_retriever(vector_store):
 def create_agent_executor(llm, response_style, vector_store=None):
     """Creates the LangChain agent and executor."""
     tools = []
+    
     # 1. Web Search Tool (Tavily)
     if TAVILY_API_KEY:
-        search_tool = TavilySearchResults(max_results=3, api_key=TAVILY_API_KEY)
-        tools.append(search_tool)
+        tavily_tool = TavilySearchResults(max_results=3, api_key=TAVILY_API_KEY)
+        # Rename the tool to 'search' which the ReAct agent prompt expects.
+        tavily_tool.name = "search"
+        # Provide a clear description for the agent.
+        tavily_tool.description = "A search engine useful for when you need to answer questions about current events or real-time information."
+        tools.append(tavily_tool)
     else:
         st.warning("Tavily API key not found. Web search is disabled.", icon="⚠️")
 
@@ -143,15 +144,17 @@ def main():
         st.session_state.messages = []
     if "vector_store" not in st.session_state:
         st.session_state.vector_store = None
+    if "uploaded_file_hash" not in st.session_state:
+        st.session_state.uploaded_file_hash = None
+
 
     # --- Sidebar and Settings ---
     provider, model_name, temperature, response_style, tts_enabled, uploaded_file = render_sidebar()
 
     # --- RAG Processing ---
     if uploaded_file:
-        # Generate a unique hash for the file content to use as a cache key
         file_hash = hashlib.md5(uploaded_file.getvalue()).hexdigest()
-        if st.session_state.get("uploaded_file_hash") != file_hash:
+        if st.session_state.uploaded_file_hash != file_hash:
             embeddings = load_embedding_model()
             st.session_state.vector_store = process_document(uploaded_file, embeddings)
             st.session_state.uploaded_file_hash = file_hash
@@ -174,13 +177,9 @@ def main():
 
         with st.chat_message("assistant"):
             try:
-                # Initialize the LLM
                 llm = get_llm(provider, model_name, temperature)
-
-                # Create the agent executor
                 agent_executor = create_agent_executor(llm, response_style, st.session_state.vector_store)
                 
-                # Invoke the agent
                 with st.spinner("🧠 Thinking..."):
                     response = agent_executor.invoke(
                         {"input": prompt, "chat_history": st.session_state.messages}
@@ -190,13 +189,11 @@ def main():
                 st.markdown(output)
                 st.session_state.messages.append(AIMessage(content=output))
 
-                # Text-to-speech
                 if tts_enabled:
                     audio_bytes = text_to_speech(output)
                     if audio_bytes:
                         st.audio(audio_bytes, format="audio/mp3")
 
-                # Display sources
                 if response.get("intermediate_steps"):
                     with st.expander("🔍 View Sources"):
                         st.json(response["intermediate_steps"])
