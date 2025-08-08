@@ -2,7 +2,7 @@
 streamlit==1.36.0
 python-dotenv==1.0.1
 
-# LangChain Libraries
+# LangChain Libraries - Pinned for stability
 langchain==0.2.0
 langchain-community==0.2.0
 langchain-core==0.2.1
@@ -16,13 +16,13 @@ langchainhub==0.1.18
 chromadb==0.5.4
 sentence-transformers==2.7.0
 pypdf==4.2.0
-unstructured[docx]  # <-- FIX: Installs necessary dependencies for DOCX parsing
+unstructured
 nltk==3.8.1
 
 # Tools & Utilities
 tavily-python==0.3.3
 gTTS==2.5.1
-certifi==2024.7.4
+certifi==2.0.24.7.4
 
 # Dependency Warning Fix
 urllib3==2.2.1
