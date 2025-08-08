@@ -13,7 +13,8 @@ from langchain import hub
 from gtts import gTTS
 
 # --- Local Project Imports ---
-from config.config import TAVILY_API_KEY, PROVIDER_MAP
+from config.config import TAVILY_API_KEY
+from models.llm import PROVIDER_MAP
 from models.llm import get_llm
 from models.embeddings import get_embedding_model
 from utils.rag_utils import create_vector_store_from_upload
