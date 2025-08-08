@@ -9,17 +9,19 @@ import ssl
 import certifi
 import json
 import nltk
-import uuid
+
+# --- Basic Configuration ---
+# CRITICAL FIX: st.set_page_config() must be the first Streamlit command.
+st.set_page_config(page_title="AI Mentor Chatbot", page_icon="🤖", layout="wide")
 
 # --- Definitive Startup Configuration ---
-# This block MUST be at the very top to configure the environment correctly.
+# This block now runs AFTER the page config is set.
 try:
-    # 1. Always apply the SSL certificate fix.
+    # 1. Configure SSL to use certifi's bundle.
     ssl._create_default_https_context = ssl._create_unverified_context
     os.environ['SSL_CERT_FILE'] = certifi.where()
 
     # 2. Ensure the NLTK 'punkt' tokenizer is available at runtime.
-    # This is the definitive fix for the "Resource punkt not found" error.
     try:
         nltk.data.find('tokenizers/punkt')
     except LookupError:
@@ -48,8 +50,6 @@ from models.embeddings import get_huggingface_embeddings
 from utils.rag_utils import get_vector_store, format_docs_with_sources
 from config.config import TAVILY_API_KEY
 
-# --- Basic Configuration ---
-st.set_page_config(page_title="AI Mentor Chatbot", page_icon="🤖", layout="wide")
 logging.basicConfig(filename='error.log', level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 # --- Caching ---
@@ -122,14 +122,6 @@ def render_sidebar():
         st.divider()
         st.header("📄 Document")
         uploaded_file = st.file_uploader("Upload a file", type=["pdf", "docx", "txt"], label_visibility="collapsed")
-        
-        # Display file info and a preview snippet
-        if uploaded_file:
-            with st.expander("File Details & Preview", expanded=True):
-                st.info(f"**Name:** `{uploaded_file.name}`\n\n**Size:** `{uploaded_file.size / 1024:.2f} KB`")
-                if uploaded_file.type == "text/plain":
-                    preview = uploaded_file.getvalue().decode("utf-8", errors="ignore").splitlines()
-                    st.text_area("Preview", "\n".join(preview[:10]), height=150, disabled=True)
 
         with st.expander("RAG Configuration"):
             chunk_size = st.slider("Chunk Size", 500, 2000, 1000)
@@ -171,26 +163,13 @@ def main():
 
     uploaded_file, chunk_size, chunk_overlap, provider, model_name, temperature, response_mode = render_sidebar()
 
-    # Proactive check for file size
-    if uploaded_file and uploaded_file.size > 10 * 1024 * 1024:  # 10 MB limit
-        st.error("File is too large (limit: 10 MB). Please upload a smaller file.")
-        st.stop()
-
     if uploaded_file:
         file_content = uploaded_file.getvalue()
         file_hash = hashlib.md5(file_content).hexdigest()
         if st.session_state.get("uploaded_file_hash") != file_hash:
             with st.spinner("📄 Processing document..."):
-                temp_dir = "temp_files"
-                # Cleanup old files before saving a new one
-                if os.path.exists(temp_dir):
-                    for f in os.listdir(temp_dir): os.remove(os.path.join(temp_dir, f))
-                else:
-                    os.makedirs(temp_dir, exist_ok=True)
-                
-                # Use a unique name to prevent collisions
-                unique_name = f"{uuid.uuid4().hex}_{uploaded_file.name}"
-                temp_path = os.path.join(temp_dir, unique_name)
+                temp_dir = "temp_files"; os.makedirs(temp_dir, exist_ok=True)
+                temp_path = os.path.join(temp_dir, uploaded_file.name)
                 with open(temp_path, "wb") as f: f.write(file_content)
                 st.session_state.uploaded_file_path = temp_path
                 st.session_state.uploaded_file_hash = file_hash
@@ -204,13 +183,6 @@ def main():
         role = "user" if isinstance(msg, HumanMessage) else "assistant"
         with st.chat_message(role): st.markdown(msg.content)
 
-    # Disable chat input if a required API key is missing
-    is_provider_ready = PROVIDER_MAP[provider]["key"]
-    if not is_provider_ready:
-        st.warning(f"The selected provider '{provider}' is missing an API key. Please add it to your .env file.")
-        st.chat_input(f"Please configure the '{provider}' API key to chat.", disabled=True)
-        st.stop()
-    
     if prompt := st.chat_input("Ask your question here..."):
         st.session_state.messages.append(HumanMessage(content=prompt))
         st.chat_message("user").markdown(prompt)
