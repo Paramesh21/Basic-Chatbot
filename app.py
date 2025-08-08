@@ -19,6 +19,7 @@ import ssl
 import certifi
 import nltk
 import tempfile
+import time
 from typing import Generator
 
 from langchain_core.messages import AIMessage, HumanMessage
@@ -57,7 +58,8 @@ def initialize_session_state():
     defaults = {
         "messages": [],
         "vector_store": None,
-        "uploaded_file_hash": None
+        "uploaded_file_hash": None,
+        "final_response_data": None
     }
     for key, value in defaults.items():
         st.session_state.setdefault(key, value)
@@ -76,7 +78,6 @@ def create_agent_executor(llm, response_style, vector_store=None, web_search_onl
     """Creates a more robust LangChain agent and executor."""
     tools = []
     
-    # Conditionally add tools based on user's choice
     if not web_search_only and vector_store:
         retriever = vector_store.as_retriever()
         tools.append(Tool(
@@ -93,10 +94,9 @@ def create_agent_executor(llm, response_style, vector_store=None, web_search_onl
 
     prompt = hub.pull("hwchase17/react")
     
-    # Add custom instructions based on the tools available
     tool_instructions = "You have access to a web 'search' tool."
     if not web_search_only and vector_store:
-        tool_instructions += " You also have a `document_search` tool. You MUST prioritize using the `document_search` tool for questions about the document."
+        tool_instructions = "You MUST prioritize using the `document_search` tool for questions about the uploaded document. Only use the web 'search' tool if the answer is not found in the document."
 
     prompt.template = prompt.template.replace(
         "Think about what to do.",
@@ -137,7 +137,13 @@ def render_sidebar():
         st.divider()
         st.header("📄 Document & Search")
         uploaded_file = st.file_uploader("Upload a document (.pdf, .docx, .txt)", type=["pdf", "docx", "txt"])
-        web_search_only = st.toggle("Web Search Only", value=False, help="If enabled, the bot will only use web search and ignore the document.")
+        web_search_only = st.toggle(
+            "Web Search Only", value=False,
+            help="If enabled, the bot will only use web search and ignore the document.",
+            disabled=not TAVILY_API_KEY
+        )
+        if not TAVILY_API_KEY:
+            st.warning("Tavily API key not found. Web search is disabled.", icon="⚠️")
         
         st.divider()
         st.header("Interface")
@@ -155,24 +161,25 @@ def render_sidebar():
 # --- Core Logic Functions ---
 def handle_document_upload(uploaded_file):
     """Processes an uploaded file and updates the vector store in session state."""
-    if uploaded_file:
-        file_hash = hashlib.md5(uploaded_file.getvalue()).hexdigest()
-        if st.session_state.uploaded_file_hash != file_hash:
-            with st.spinner("📄 Processing document..."):
-                with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(uploaded_file.name)[-1]) as tmp:
-                    tmp.write(uploaded_file.getvalue())
-                    tmp_path = tmp.name
-                
-                try:
-                    embeddings = load_embedding_model()
-                    st.session_state.vector_store = create_vector_store_from_upload(tmp_path, embeddings)
-                    st.session_state.uploaded_file_hash = file_hash
-                    st.sidebar.success("Document processed successfully!")
-                except Exception as e:
-                    st.sidebar.error(f"Error: {e}")
-                finally:
-                    if os.path.exists(tmp_path):
-                        os.remove(tmp_path)
+    if uploaded_file and st.session_state.get("uploaded_file_hash") != hashlib.md5(uploaded_file.getvalue()).hexdigest():
+        start_time = time.time()
+        with st.spinner("📄 Processing document..."):
+            with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(uploaded_file.name)[-1]) as tmp:
+                tmp.write(uploaded_file.getvalue())
+                tmp_path = tmp.name
+            
+            try:
+                embeddings = load_embedding_model()
+                st.session_state.vector_store = create_vector_store_from_upload(tmp_path, embeddings)
+                st.session_state.uploaded_file_hash = hashlib.md5(uploaded_file.getvalue()).hexdigest()
+                processing_time = time.time() - start_time
+                st.sidebar.success(f"Document processed in {processing_time:.2f} seconds.")
+            except Exception as e:
+                st.sidebar.error(f"Error processing document: {e}")
+                st.session_state.vector_store = None # Ensure state is cleared on failure
+            finally:
+                if os.path.exists(tmp_path):
+                    os.remove(tmp_path)
 
 def display_sources(intermediate_steps):
     """Displays the sources and thought process of the agent in a readable format."""
@@ -185,8 +192,14 @@ def display_sources(intermediate_steps):
             action, observation = step
             with st.container(border=True):
                 st.markdown(f"**Step {i+1}: Using tool `{action.tool}`**")
-                st.markdown(f"**Tool Input:**")
-                st.code(action.log.split('Action Input:')[1].strip(), language='text')
+                # Safely extract tool input from log
+                try:
+                    tool_input = action.log.split('Action Input:')[1].strip()
+                    st.markdown(f"**Tool Input:**")
+                    st.code(tool_input, language='text')
+                except IndexError:
+                    st.markdown("**Tool Input:** `(Not available)`")
+                
                 st.markdown("**Observation:**")
                 st.info(observation)
 
@@ -195,7 +208,6 @@ def stream_agent_response(agent_executor, prompt) -> Generator:
     full_response = ""
     intermediate_steps = []
 
-    # Use .stream() for real-time output
     for chunk in agent_executor.stream({"input": prompt, "chat_history": st.session_state.messages}):
         if "output" in chunk:
             output_chunk = chunk["output"]
@@ -213,30 +225,33 @@ def handle_chat_interaction(prompt, llm, response_style, tts_enabled, web_search
         st.markdown(prompt)
 
     with st.chat_message("assistant"):
+        start_time = time.time()
         try:
             agent_executor = create_agent_executor(llm, response_style, st.session_state.vector_store, web_search_only)
             
-            with st.spinner("🧠 Thinking..."):
-                # Write the streamed response
-                stream_generator = stream_agent_response(agent_executor, prompt)
-                
-                # Use st.write_stream to render the output in real-time
-                def response_generator():
-                    for chunk in stream_generator:
-                        if "output" in chunk:
-                            yield chunk["output"]
-                        else:
-                            # This is the final chunk with the full response and steps
-                            st.session_state.final_response_data = chunk
-
-                st.write_stream(response_generator)
+            # Use a placeholder for the streamed response
+            response_placeholder = st.empty()
             
+            # Generator for streaming
+            stream_generator = stream_agent_response(agent_executor, prompt)
+            
+            # Render the response in real-time
+            full_response = ""
+            for chunk in stream_generator:
+                if "output" in chunk:
+                    full_response += chunk["output"]
+                    response_placeholder.markdown(full_response + "▌")
+                else:
+                    st.session_state.final_response_data = chunk
+            response_placeholder.markdown(full_response)
+            
+            response_time = time.time() - start_time
+            st.caption(f"Response generated in {response_time:.2f} seconds.")
+
             final_data = st.session_state.get("final_response_data", {})
-            full_response = final_data.get("full_response", "An error occurred.")
             intermediate_steps = final_data.get("intermediate_steps", [])
             
             st.session_state.messages.append(AIMessage(content=full_response))
-            
             display_sources(intermediate_steps)
 
             if tts_enabled and full_response:
@@ -257,11 +272,10 @@ def handle_chat_interaction(prompt, llm, response_style, tts_enabled, web_search
             st.error(error_message)
             st.session_state.messages.append(AIMessage(content=error_message))
 
-
 # --- Main Application ---
 def main():
     """Main function to run the Streamlit app."""
-    st.title("🤖 Basic Chatbot")
+    st.title("🤖 AI Mentor Chatbot")
 
     provider, model_name, temperature, response_style, tts_enabled, uploaded_file, web_search_only = render_sidebar()
     
