@@ -14,11 +14,13 @@ langchain-google-genai==1.0.5
 langchain-huggingface==0.0.3
 langchainhub==0.1.20
 
-# RAG & Document Processing (ChromaDB for vector storage)
+# RAG & Document Processing
 chromadb==0.5.3
 pypdf==4.2.0
 python-docx==1.1.2
 unstructured==0.14.8
+nltk==3.8.1
+certifi==2024.7.4
 
 # Tools & Utilities
 tavily-python==0.3.3
