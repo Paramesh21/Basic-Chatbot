@@ -8,15 +8,27 @@ from io import BytesIO
 import ssl
 import certifi
 import json
+import nltk
 
-# --- Definitive SSL Certificate Fix ---
-# This must be at the very top to configure SSL to use certifi's trusted
-# certificates before any network libraries (like requests) are imported.
+# --- Definitive Startup Configuration ---
+# This block MUST be at the very top to configure the environment correctly.
 try:
+    # 1. Always apply the SSL certificate fix.
+    # This ensures all network requests in the app use a trusted certificate bundle.
     ssl._create_default_https_context = ssl._create_unverified_context
     os.environ['SSL_CERT_FILE'] = certifi.where()
+
+    # 2. Ensure the NLTK 'punkt' tokenizer is available at runtime.
+    # This is crucial for Streamlit Cloud and other fresh environments.
+    try:
+        nltk.data.find('tokenizers/punkt')
+    except LookupError:
+        st.info("Downloading necessary NLTK data (punkt)...")
+        nltk.download('punkt')
 except Exception as e:
-    logging.error(f"Failed to apply SSL patch: {e}")
+    logging.error(f"Failed to apply startup patches (SSL/NLTK): {e}")
+    st.error(f"A critical error occurred on startup: {e}")
+
 
 # --- Library Imports ---
 from langchain_core.messages import AIMessage, HumanMessage
@@ -43,19 +55,16 @@ st.set_page_config(page_title="Basic Chatbot", page_icon="🤖", layout="wide")
 logging.basicConfig(filename='error.log', level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 # --- Caching ---
-# Cache the embeddings model across the entire session.
 @st.cache_resource
 def get_embeddings_model_cached():
     """Returns a cached instance of the HuggingFace embeddings model."""
     return get_huggingface_embeddings()
 
-# Cache the vector store based on file content. Reruns only if the file changes.
 @st.cache_data(max_entries=5, ttl=3600)
 def create_vector_store_cached(_file_hash, chunk_size, chunk_overlap):
     """Creates and caches a vector store from the uploaded document."""
     if "uploaded_file_path" in st.session_state:
         try:
-            # Use the cached embeddings model
             embeddings = get_embeddings_model_cached()
             return get_vector_store(st.session_state.uploaded_file_path, chunk_size, chunk_overlap, embeddings)
         except Exception as e:
@@ -69,29 +78,21 @@ def create_agent(chat_model, vector_store, response_mode):
     if not TAVILY_API_KEY:
         raise ValueError("Tavily API key is missing. Please set it in your .env file.")
 
-    # 1. Web Search Tool
-    search_tool = TavilySearchResults(max_results=3, api_key=TAVILY_API_KEY)
-
-    # 2. Document Search Tool (Retriever)
+    search_tool = TavilySearchResults(max_results=3, api_key=TAVily_API_KEY)
     retriever = vector_store.as_retriever()
     doc_tool = Tool(
         name="document_search",
         func=retriever.invoke,
         description="Searches ONLY the content of the uploaded document. Input should be a concise search query."
     )
-
     tools = [search_tool, doc_tool]
-
-    # Pull the base ReAct prompt from LangChain Hub
     prompt = hub.pull("hwchase17/react")
 
-    # Proactively add response style instructions to the prompt
     mode_instructions = (
         "Respond in a detailed, multi-paragraph format."
         if response_mode == "Detailed"
         else "Respond in a concise, direct format, ideally in 3 sentences or less."
     )
-    # Safely insert instructions into the prompt template
     prompt.template = f"RESPONSE STYLE: {mode_instructions}\n\n" + prompt.template
 
     agent = create_react_agent(chat_model, tools, prompt)
@@ -108,8 +109,6 @@ def render_sidebar():
     """Renders the sidebar UI elements and returns their current state."""
     with st.sidebar:
         st.header("⚙️ Settings")
-
-        # LLM Provider and Model Selection
         provider_options = [f"{p} {'✅' if details['key'] else '❌'}" for p, details in PROVIDER_MAP.items()]
         selected_option = st.selectbox("LLM Provider", provider_options)
 
@@ -120,15 +119,15 @@ def render_sidebar():
                 break
 
         model_name = st.selectbox("Model", PROVIDER_MAP[provider].get("models", []))
-        temperature = st.slider("Temperature", 0.0, 1.0, 0.7, 0.05, help="Controls randomness. Lower is more deterministic.")
+        temperature = st.slider("Temperature", 0.0, 1.0, 0.7, 0.05)
 
         st.divider()
         st.header("📄 Document")
-        uploaded_file = st.file_uploader("Upload a .pdf, .docx, or .txt file", type=["pdf", "docx", "txt"], label_visibility="collapsed")
+        uploaded_file = st.file_uploader("Upload", type=["pdf", "docx", "txt"], label_visibility="collapsed")
 
         with st.expander("RAG Configuration"):
-            chunk_size = st.slider("Chunk Size", 500, 2000, 1000, help="The size of text chunks for the vector store.")
-            chunk_overlap = st.slider("Chunk Overlap", 0, 500, 200, help="How much text overlaps between chunks.")
+            chunk_size = st.slider("Chunk Size", 500, 2000, 1000)
+            chunk_overlap = st.slider("Chunk Overlap", 0, 500, 200)
 
         st.divider()
         st.header("Interface Settings")
@@ -199,47 +198,3 @@ def main():
             output = ""
             try:
                 with st.spinner("🧠 Thinking..."):
-                    chat_model = get_llm_model(provider, model_name, temperature=temperature)
-
-                    vector_store = st.session_state.get("vector_store")
-                    if not vector_store:
-                        from langchain_core.retrievers import BaseRetriever
-                        class DummyRetriever(BaseRetriever):
-                            def _get_relevant_documents(self, query): return []
-                        vector_store = type('obj', (object,), {'as_retriever': DummyRetriever})()
-
-                    agent_executor = create_agent(chat_model, vector_store, response_mode)
-                    response = agent_executor.invoke({"input": prompt, "chat_history": st.session_state.messages[-10:]})
-                    output = response.get("output", "I encountered an issue. Please try again.")
-                    st.markdown(output)
-
-                    if st.session_state.get("tts_enabled"):
-                        audio_bytes = text_to_speech(output)
-                        if audio_bytes:
-                            st.audio(audio_bytes, format="audio/mp3")
-
-                    if response.get("intermediate_steps"):
-                        with st.expander("🔍 View Sources", expanded=False):
-                            for i, (agent_action, result) in enumerate(response["intermediate_steps"]):
-                                st.info(f"**Tool Used:** `{agent_action.tool}`")
-                                if agent_action.tool == "document_search":
-                                    st.text_area("Retrieved Document Content:", value=format_docs_with_sources(result), height=200, disabled=True, key=f"doc_source_{i}")
-                                else:
-                                    # FIX: Removed the unsupported 'key' argument from st.json
-                                    st.json(result)
-                
-                st.session_state.messages.append(AIMessage(content=output))
-
-            except (GroqRateLimitError, OpenAIRateLimitError, ResourceExhausted) as e:
-                error_message = f"⚠️ **API Quota Exceeded:** The `{provider}` API has reached its rate limit. Please check your plan, wait a moment, or try another provider."
-                logging.error(f"Quota Error for {provider}: {e}")
-                st.error(error_message)
-                st.session_state.messages.append(AIMessage(content=error_message))
-            except Exception as e:
-                error_message = f"An unexpected error occurred: {e}"
-                logging.error(f"Unexpected error in main loop: {e}", exc_info=True)
-                st.error(error_message)
-                st.session_state.messages.append(AIMessage(content=error_message))
-
-if __name__ == "__main__":
-    main()
