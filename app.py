@@ -9,11 +9,12 @@ import ssl
 import certifi
 import json
 import nltk
+import uuid
 
 # --- Definitive Startup Configuration ---
 # This block MUST be at the very top to configure the environment correctly.
 try:
-    # 1. Configure SSL to use certifi's bundle.
+    # 1. Always apply the SSL certificate fix.
     ssl._create_default_https_context = ssl._create_unverified_context
     os.environ['SSL_CERT_FILE'] = certifi.where()
 
@@ -75,7 +76,7 @@ def create_agent(chat_model, vector_store, response_mode):
     if not TAVILY_API_KEY:
         raise ValueError("Tavily API key is missing. Please set it in your .env file.")
 
-    search_tool = TavilySearchResults(max_results=3, api_key=TAVILY_API_KEY) # FIX: Corrected typo
+    search_tool = TavilySearchResults(max_results=3, api_key=TAVILY_API_KEY)
     retriever = vector_store.as_retriever()
     doc_tool = Tool(
         name="document_search",
@@ -121,6 +122,14 @@ def render_sidebar():
         st.divider()
         st.header("📄 Document")
         uploaded_file = st.file_uploader("Upload a file", type=["pdf", "docx", "txt"], label_visibility="collapsed")
+        
+        # Display file info and a preview snippet
+        if uploaded_file:
+            with st.expander("File Details & Preview", expanded=True):
+                st.info(f"**Name:** `{uploaded_file.name}`\n\n**Size:** `{uploaded_file.size / 1024:.2f} KB`")
+                if uploaded_file.type == "text/plain":
+                    preview = uploaded_file.getvalue().decode("utf-8", errors="ignore").splitlines()
+                    st.text_area("Preview", "\n".join(preview[:10]), height=150, disabled=True)
 
         with st.expander("RAG Configuration"):
             chunk_size = st.slider("Chunk Size", 500, 2000, 1000)
@@ -133,7 +142,10 @@ def render_sidebar():
 
         st.divider()
         if st.button("🗑️ Clear Chat History", use_container_width=True, type="primary"):
-            st.session_state.clear()
+            keys_to_clear = ["messages", "vector_store", "uploaded_file_path", "uploaded_file_hash"]
+            for key in keys_to_clear:
+                if key in st.session_state:
+                    del st.session_state[key]
             st.rerun()
 
         return uploaded_file, chunk_size, chunk_overlap, provider, model_name, temperature, response_mode
@@ -159,14 +171,26 @@ def main():
 
     uploaded_file, chunk_size, chunk_overlap, provider, model_name, temperature, response_mode = render_sidebar()
 
+    # Proactive check for file size
+    if uploaded_file and uploaded_file.size > 10 * 1024 * 1024:  # 10 MB limit
+        st.error("File is too large (limit: 10 MB). Please upload a smaller file.")
+        st.stop()
+
     if uploaded_file:
         file_content = uploaded_file.getvalue()
         file_hash = hashlib.md5(file_content).hexdigest()
         if st.session_state.get("uploaded_file_hash") != file_hash:
             with st.spinner("📄 Processing document..."):
                 temp_dir = "temp_files"
-                os.makedirs(temp_dir, exist_ok=True)
-                temp_path = os.path.join(temp_dir, uploaded_file.name)
+                # Cleanup old files before saving a new one
+                if os.path.exists(temp_dir):
+                    for f in os.listdir(temp_dir): os.remove(os.path.join(temp_dir, f))
+                else:
+                    os.makedirs(temp_dir, exist_ok=True)
+                
+                # Use a unique name to prevent collisions
+                unique_name = f"{uuid.uuid4().hex}_{uploaded_file.name}"
+                temp_path = os.path.join(temp_dir, unique_name)
                 with open(temp_path, "wb") as f: f.write(file_content)
                 st.session_state.uploaded_file_path = temp_path
                 st.session_state.uploaded_file_hash = file_hash
@@ -180,12 +204,19 @@ def main():
         role = "user" if isinstance(msg, HumanMessage) else "assistant"
         with st.chat_message(role): st.markdown(msg.content)
 
+    # Disable chat input if a required API key is missing
+    is_provider_ready = PROVIDER_MAP[provider]["key"]
+    if not is_provider_ready:
+        st.warning(f"The selected provider '{provider}' is missing an API key. Please add it to your .env file.")
+        st.chat_input(f"Please configure the '{provider}' API key to chat.", disabled=True)
+        st.stop()
+    
     if prompt := st.chat_input("Ask your question here..."):
         st.session_state.messages.append(HumanMessage(content=prompt))
         st.chat_message("user").markdown(prompt)
 
         with st.chat_message("assistant"):
-            output = "" # Ensure output is always defined
+            output = ""
             try:
                 with st.spinner("🧠 Thinking..."):
                     chat_model = get_llm_model(provider, model_name, temperature=temperature)
@@ -213,19 +244,19 @@ def main():
                                 if agent_action.tool == "document_search":
                                     st.text_area("Retrieved Content:", value=format_docs_with_sources(result), height=200, disabled=True, key=f"doc_source_{i}")
                                 else:
-                                    st.json(result) # FIX: Key removed here
+                                    st.json(result)
 
                 st.session_state.messages.append(AIMessage(content=output))
             except (GroqRateLimitError, OpenAIRateLimitError, ResourceExhausted) as e:
                 error_message = f"⚠️ **API Quota Exceeded:** The `{provider}` API has reached its rate limit. Please check your plan or try another provider."
                 logging.error(f"Quota Error for {provider}: {e}")
                 st.error(error_message)
-                st.session_state.messages.append(AIMessage(content=error_message)) # Add error to history
+                st.session_state.messages.append(AIMessage(content=error_message))
             except Exception as e:
                 error_message = f"An unexpected error occurred: {e}"
                 logging.error(f"Unexpected error: {e}", exc_info=True)
                 st.error(error_message)
-                st.session_state.messages.append(AIMessage(content=error_message)) # Add error to history
+                st.session_state.messages.append(AIMessage(content=error_message))
 
 if __name__ == "__main__":
     main()
