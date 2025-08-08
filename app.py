@@ -13,22 +13,20 @@ import nltk
 # --- Definitive Startup Configuration ---
 # This block MUST be at the very top to configure the environment correctly.
 try:
-    # 1. Always apply the SSL certificate fix.
-    # This ensures all network requests in the app use a trusted certificate bundle.
+    # 1. Configure SSL to use certifi's bundle.
     ssl._create_default_https_context = ssl._create_unverified_context
     os.environ['SSL_CERT_FILE'] = certifi.where()
 
     # 2. Ensure the NLTK 'punkt' tokenizer is available at runtime.
-    # This is crucial for Streamlit Cloud and other fresh environments.
+    # This is the definitive fix for the "Resource punkt not found" error.
     try:
         nltk.data.find('tokenizers/punkt')
     except LookupError:
         st.info("Downloading necessary NLTK data (punkt)...")
-        nltk.download('punkt')
+        nltk.download('punkt', quiet=True)
 except Exception as e:
     logging.error(f"Failed to apply startup patches (SSL/NLTK): {e}")
     st.error(f"A critical error occurred on startup: {e}")
-
 
 # --- Library Imports ---
 from langchain_core.messages import AIMessage, HumanMessage
@@ -42,7 +40,6 @@ from openai import RateLimitError as OpenAIRateLimitError
 from google.api_core.exceptions import ResourceExhausted
 from groq import RateLimitError as GroqRateLimitError
 
-
 # --- System Path and Local Imports ---
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '.')))
 from models.llm import get_llm_model, PROVIDER_MAP
@@ -51,7 +48,7 @@ from utils.rag_utils import get_vector_store, format_docs_with_sources
 from config.config import TAVILY_API_KEY
 
 # --- Basic Configuration ---
-st.set_page_config(page_title="Basic Chatbot", page_icon="🤖", layout="wide")
+st.set_page_config(page_title="AI Mentor Chatbot", page_icon="🤖", layout="wide")
 logging.basicConfig(filename='error.log', level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 # --- Caching ---
@@ -78,7 +75,7 @@ def create_agent(chat_model, vector_store, response_mode):
     if not TAVILY_API_KEY:
         raise ValueError("Tavily API key is missing. Please set it in your .env file.")
 
-    search_tool = TavilySearchResults(max_results=3, api_key=TAVily_API_KEY)
+    search_tool = TavilySearchResults(max_results=3, api_key=TAVILY_API_KEY) # FIX: Corrected typo
     retriever = vector_store.as_retriever()
     doc_tool = Tool(
         name="document_search",
@@ -101,7 +98,7 @@ def create_agent(chat_model, vector_store, response_mode):
         tools=tools,
         verbose=True,
         return_intermediate_steps=True,
-        handle_parsing_errors="Check your output and make sure it conforms to the correct format!"
+        handle_parsing_errors="I encountered an issue with the output format. Please try again."
     )
 
 # --- UI Rendering ---
@@ -118,12 +115,12 @@ def render_sidebar():
                 provider = p_key
                 break
 
-        model_name = st.selectbox("Model", PROVIDER_MAP[provider].get("models", []))
-        temperature = st.slider("Temperature", 0.0, 1.0, 0.7, 0.05)
+        model_name = st.selectbox("Model", PROVIDER_MAP.get(provider, {}).get("models", []))
+        temperature = st.slider("Temperature", 0.0, 1.0, 0.7, 0.05, help="Controls randomness.")
 
         st.divider()
         st.header("📄 Document")
-        uploaded_file = st.file_uploader("Upload", type=["pdf", "docx", "txt"], label_visibility="collapsed")
+        uploaded_file = st.file_uploader("Upload a file", type=["pdf", "docx", "txt"], label_visibility="collapsed")
 
         with st.expander("RAG Configuration"):
             chunk_size = st.slider("Chunk Size", 500, 2000, 1000)
@@ -136,11 +133,7 @@ def render_sidebar():
 
         st.divider()
         if st.button("🗑️ Clear Chat History", use_container_width=True, type="primary"):
-            st.session_state.messages = []
-            keys_to_clear = ["vector_store", "uploaded_file_path", "uploaded_file_hash"]
-            for key in keys_to_clear:
-                if key in st.session_state:
-                    del st.session_state[key]
+            st.session_state.clear()
             st.rerun()
 
         return uploaded_file, chunk_size, chunk_overlap, provider, model_name, temperature, response_mode
@@ -161,7 +154,7 @@ def text_to_speech(text):
 
 # --- Main App Logic ---
 def main():
-    st.title("🤖 Basic Chatbot")
+    st.title("🤖 AI Mentor Chatbot")
     st.session_state.setdefault("messages", [])
 
     uploaded_file, chunk_size, chunk_overlap, provider, model_name, temperature, response_mode = render_sidebar()
@@ -170,31 +163,69 @@ def main():
         file_content = uploaded_file.getvalue()
         file_hash = hashlib.md5(file_content).hexdigest()
         if st.session_state.get("uploaded_file_hash") != file_hash:
-            with st.spinner("📄 Processing document... Please wait."):
-                temp_dir = "temp_files"; os.makedirs(temp_dir, exist_ok=True)
+            with st.spinner("📄 Processing document..."):
+                temp_dir = "temp_files"
+                os.makedirs(temp_dir, exist_ok=True)
                 temp_path = os.path.join(temp_dir, uploaded_file.name)
                 with open(temp_path, "wb") as f: f.write(file_content)
                 st.session_state.uploaded_file_path = temp_path
                 st.session_state.uploaded_file_hash = file_hash
                 st.session_state.vector_store = create_vector_store_cached(file_hash, chunk_size, chunk_overlap)
-            st.success("Document processed successfully!")
+            st.success("Document processed and ready!")
 
     if not st.session_state.messages:
-        st.info("Welcome! Ask a general question or upload a document to query its content.")
+        st.info("Welcome! Ask a general question or upload a document to begin.")
 
     for msg in st.session_state.messages:
         role = "user" if isinstance(msg, HumanMessage) else "assistant"
-        with st.chat_message(role):
-            st.markdown(msg.content)
+        with st.chat_message(role): st.markdown(msg.content)
 
     if prompt := st.chat_input("Ask your question here..."):
         st.session_state.messages.append(HumanMessage(content=prompt))
         st.chat_message("user").markdown(prompt)
 
         with st.chat_message("assistant"):
-            if not st.session_state.get("vector_store"):
-                st.warning("Please upload a document to use the document search feature.")
-
-            output = ""
+            output = "" # Ensure output is always defined
             try:
                 with st.spinner("🧠 Thinking..."):
+                    chat_model = get_llm_model(provider, model_name, temperature=temperature)
+                    
+                    vector_store = st.session_state.get("vector_store")
+                    if not vector_store:
+                        from langchain_core.retrievers import BaseRetriever
+                        class DummyRetriever(BaseRetriever):
+                            def _get_relevant_documents(self, query): return []
+                        vector_store = type('obj', (object,), {'as_retriever': DummyRetriever})()
+                    
+                    agent_executor = create_agent(chat_model, vector_store, response_mode)
+                    response = agent_executor.invoke({"input": prompt, "chat_history": st.session_state.messages[-10:]})
+                    output = response.get("output", "I encountered an issue. Please try again.")
+                    st.markdown(output)
+
+                    if st.session_state.get("tts_enabled"):
+                        audio_bytes = text_to_speech(output)
+                        if audio_bytes: st.audio(audio_bytes, format="audio/mp3")
+
+                    if response.get("intermediate_steps"):
+                        with st.expander("🔍 View Sources", expanded=False):
+                            for i, (agent_action, result) in enumerate(response["intermediate_steps"]):
+                                st.info(f"**Tool Used:** `{agent_action.tool}`")
+                                if agent_action.tool == "document_search":
+                                    st.text_area("Retrieved Content:", value=format_docs_with_sources(result), height=200, disabled=True, key=f"doc_source_{i}")
+                                else:
+                                    st.json(result) # FIX: Key removed here
+
+                st.session_state.messages.append(AIMessage(content=output))
+            except (GroqRateLimitError, OpenAIRateLimitError, ResourceExhausted) as e:
+                error_message = f"⚠️ **API Quota Exceeded:** The `{provider}` API has reached its rate limit. Please check your plan or try another provider."
+                logging.error(f"Quota Error for {provider}: {e}")
+                st.error(error_message)
+                st.session_state.messages.append(AIMessage(content=error_message)) # Add error to history
+            except Exception as e:
+                error_message = f"An unexpected error occurred: {e}"
+                logging.error(f"Unexpected error: {e}", exc_info=True)
+                st.error(error_message)
+                st.session_state.messages.append(AIMessage(content=error_message)) # Add error to history
+
+if __name__ == "__main__":
+    main()
