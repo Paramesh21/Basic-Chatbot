@@ -21,7 +21,7 @@ def get_vector_store(file_path: str, chunk_size: int, chunk_overlap: int, embedd
 
         documents = loader.load()
         if not documents:
-            raise ValueError(f"No content loaded from '{os.path.basename(file_path)}'. The file may be empty or corrupted.")
+            raise ValueError(f"No content could be loaded from '{os.path.basename(file_path)}'. The file may be empty or corrupted.")
 
         text_splitter = RecursiveCharacterTextSplitter(chunk_size=chunk_size, chunk_overlap=chunk_overlap)
         chunks = text_splitter.split_documents(documents)
