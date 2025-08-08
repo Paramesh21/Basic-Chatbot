@@ -21,22 +21,22 @@ def get_vector_store(file_path: str, chunk_size: int, chunk_overlap: int, embedd
 
         documents = loader.load()
         if not documents:
-            raise ValueError(f"No content loaded from '{os.path.basename(file_path)}'.")
+            raise ValueError(f"No content could be loaded from '{os.path.basename(file_path)}'. The file may be empty or corrupted.")
 
         text_splitter = RecursiveCharacterTextSplitter(chunk_size=chunk_size, chunk_overlap=chunk_overlap)
         chunks = text_splitter.split_documents(documents)
 
-        # FIX: Ensure Chroma runs in a stable, in-memory mode
+        # DEFINITIVE FIX: Use Chroma for cloud compatibility. It's pure Python and reliable.
         return Chroma.from_documents(documents=chunks, embedding=embeddings)
 
     except Exception as e:
         raise RuntimeError(f"Failed to create vector store for '{os.path.basename(file_path)}': {e}") from e
 
 def format_docs_with_sources(docs: list) -> str:
-    """Formats retrieved documents, including source metadata."""
+    """Formats retrieved documents with source information."""
     if not docs:
         return "No relevant content found in the document for this query."
-        
+
     formatted_docs = []
     for i, doc in enumerate(docs):
         source = doc.metadata.get("source", "Unknown")
