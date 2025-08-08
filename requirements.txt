@@ -3,7 +3,7 @@
 # Core Frameworks
 streamlit==1.36.0
 python-dotenv==1.0.1
-pysqlite3-binary==0.5.3 
+pysqlite3-binary==0.5.3
 
 # LangChain Libraries
 langchain==0.2.5
@@ -19,7 +19,8 @@ langchainhub==0.1.20
 chromadb==0.5.3
 pypdf==4.2.0
 python-docx==1.1.2
-unstructured==0.14.8
+# FIX: Added [pdf] to install necessary dependencies for PDF processing
+unstructured[pdf]==0.14.8
 nltk==3.8.1
 certifi==2024.7.4
 
