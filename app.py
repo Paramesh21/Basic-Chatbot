@@ -21,7 +21,6 @@ except Exception as e:
 # --- Library Imports ---
 from langchain_core.messages import AIMessage, HumanMessage
 from langchain.agents import create_react_agent, AgentExecutor
-from langchain_core.prompts import ChatPromptTemplate
 from langchain_community.tools.tavily_search import TavilySearchResults
 from langchain.tools import Tool
 from gtts import gTTS
@@ -40,7 +39,7 @@ from utils.rag_utils import get_vector_store, format_docs_with_sources
 from config.config import TAVILY_API_KEY
 
 # --- Basic Configuration ---
-st.set_page_config(page_title="AI Mentor Chatbot", page_icon="🤖", layout="wide")
+st.set_page_config(page_title="Basic Chatbot", page_icon="🤖", layout="wide")
 logging.basicConfig(filename='error.log', level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 # --- Caching ---
@@ -115,7 +114,6 @@ def render_sidebar():
         selected_option = st.selectbox("LLM Provider", provider_options)
 
         # FIX: Correctly parse the provider name from the selected option
-        # This prevents the "KeyError: 'Google'" by correctly identifying "Google Gemini"
         provider = ""
         for p_key in PROVIDER_MAP.keys():
             if selected_option.startswith(p_key):
@@ -166,7 +164,7 @@ def text_to_speech(text):
 
 # --- Main App Logic ---
 def main():
-    st.title("🤖 AI Mentor Chatbot")
+    st.title("🤖 Basic Chatbot") # FIX: Renamed the chatbot
     st.session_state.setdefault("messages", [])
 
     # Render sidebar and get settings
@@ -176,7 +174,7 @@ def main():
     if uploaded_file:
         file_content = uploaded_file.getvalue()
         file_hash = hashlib.md5(file_content).hexdigest()
-        # Check if this is a new file or if settings changed
+        # Check if this is a new file
         if st.session_state.get("uploaded_file_hash") != file_hash:
             with st.spinner("📄 Processing document... Please wait."):
                 temp_dir = "temp_files"
@@ -187,7 +185,7 @@ def main():
 
                 st.session_state.uploaded_file_path = temp_path
                 st.session_state.uploaded_file_hash = file_hash
-                # This will trigger the cached function to run and store the result
+                # Trigger the cached function to run and store the result
                 st.session_state.vector_store = create_vector_store_cached(file_hash, chunk_size, chunk_overlap)
             st.success("Document processed successfully!")
 
@@ -209,34 +207,29 @@ def main():
             if not st.session_state.get("vector_store"):
                 st.warning("Please upload a document to use the document search feature.")
                 # Allow general conversation even without a file
-                # To restrict, uncomment the next two lines:
-                # st.stop()
 
             # Centralized block for robust error handling
+            output = ""
             try:
                 with st.spinner("🧠 Thinking..."):
-                    # Get model; this will fail if the key is missing
+                    # Get model; this will fail gracefully if the key is missing
                     chat_model = get_llm_model(provider, model_name, temperature=temperature)
 
-                    # Create agent; will fail if Tavily key is missing
-                    # Use a default in-memory vector store if none is loaded
+                    # Use a dummy retriever if no document is uploaded
                     vector_store = st.session_state.get("vector_store")
                     if not vector_store:
-                        st.info("No document loaded. Web search is available.")
-                        # Create a dummy retriever that returns nothing
                         from langchain_core.retrievers import BaseRetriever
                         from langchain_core.documents import Document
                         class DummyRetriever(BaseRetriever):
                             def _get_relevant_documents(self, query): return []
                         vector_store = type('obj', (object,), {'as_retriever': DummyRetriever})()
 
-
                     agent_executor = create_agent(chat_model, vector_store, response_mode)
 
                     # Invoke agent
                     response = agent_executor.invoke({
                         "input": prompt,
-                        "chat_history": st.session_state.messages[-10:] # Include recent history
+                        "chat_history": st.session_state.messages[-10:]
                     })
                     output = response.get("output", "I encountered an issue. Please try again.")
                     st.markdown(output)
@@ -251,17 +244,17 @@ def main():
                     if response.get("intermediate_steps"):
                         with st.expander("🔍 View Sources", expanded=False):
                             for i, (agent_action, result) in enumerate(response["intermediate_steps"]):
-                                # **FIX:** Removed the unsupported 'key' argument from st.info
+                                # FIX: Removed the unsupported 'key' argument from st.info
                                 st.info(f"**Tool Used:** `{agent_action.tool}`")
                                 if agent_action.tool == "document_search":
                                     st.text_area("Retrieved Document Content:", value=format_docs_with_sources(result), height=200, disabled=True, key=f"doc_source_{i}")
                                 else: # Web search result
                                     st.json(result, key=f"web_source_{i}")
-
+                
                 # Append successful response to history
                 st.session_state.messages.append(AIMessage(content=output))
 
-            # **FIX:** Specific handling for API quota/rate limit errors
+            # FIX: Specific handling for API quota/rate limit errors
             except (GroqRateLimitError, OpenAIRateLimitError, ResourceExhausted) as e:
                 error_message = f"⚠️ **API Quota Exceeded:** The `{provider}` API has reached its rate limit. Please check your plan, wait a moment, or try another provider."
                 logging.error(f"Quota Error for {provider}: {e}")
