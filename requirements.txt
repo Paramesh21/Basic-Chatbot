@@ -3,6 +3,7 @@
 # Core Frameworks
 streamlit==1.36.0
 python-dotenv==1.0.1
+pysqlite3-binary==0.5.3 
 
 # LangChain Libraries
 langchain==0.2.5
