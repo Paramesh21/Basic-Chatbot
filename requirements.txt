@@ -16,7 +16,7 @@ langchainhub==0.1.18
 chromadb==0.5.4
 sentence-transformers==2.7.0
 pypdf==4.2.0
-unstructured  # <-- FIX: Unpinned for better cloud compatibility
+unstructured  # <-- Unpinned for better cloud compatibility
 nltk==3.8.1
 
 # Tools & Utilities
