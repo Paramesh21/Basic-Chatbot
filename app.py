@@ -5,16 +5,21 @@ import streamlit as st
 st.set_page_config(page_title="AI Mentor Chatbot", page_icon="🤖", layout="wide")
 
 
+# --- Hot-patch for sqlite3 on Streamlit Cloud ---
+__import__('pysqlite3')
+import sys
+sys.modules['sqlite3'] = sys.modules.pop('pysqlite3')
+
+
 # --- Standard & External Library Imports ---
 import os
-import sys
 import hashlib
 from io import BytesIO
 import ssl
 import certifi
 import nltk
 import tempfile
-import logging
+from typing import Generator
 
 from langchain_core.messages import AIMessage, HumanMessage
 from langchain.agents import create_react_agent, AgentExecutor
@@ -28,7 +33,6 @@ from groq import RateLimitError as GroqRateLimitError
 
 
 # --- SSL/NLTK Setup for Cloud Deployment ---
-# This block is critical for ensuring the app works on Streamlit Cloud.
 def configure_deployment_environment():
     try:
         ssl._create_default_https_context = ssl._create_unverified_context
@@ -41,7 +45,6 @@ configure_deployment_environment()
 
 
 # --- Local Project Imports ---
-# This ensures the app can find the local modules.
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '.')))
 from models.llm import get_llm, PROVIDER_MAP
 from models.embeddings import get_embedding_model
@@ -51,12 +54,13 @@ from config.config import TAVILY_API_KEY
 
 # --- Session State Initialization ---
 def initialize_session_state():
-    if "messages" not in st.session_state:
-        st.session_state.messages = []
-    if "vector_store" not in st.session_state:
-        st.session_state.vector_store = None
-    if "uploaded_file_hash" not in st.session_state:
-        st.session_state.uploaded_file_hash = None
+    defaults = {
+        "messages": [],
+        "vector_store": None,
+        "uploaded_file_hash": None
+    }
+    for key, value in defaults.items():
+        st.session_state.setdefault(key, value)
 
 initialize_session_state()
 
@@ -64,30 +68,55 @@ initialize_session_state()
 # --- Caching ---
 @st.cache_resource(show_spinner="Loading embedding model...")
 def load_embedding_model():
-    """Loads and caches the embedding model."""
     return get_embedding_model()
 
 
 # --- Agent & Tool Creation ---
-def create_agent_executor(llm, response_style, vector_store=None):
-    """Creates the LangChain agent and executor."""
+def create_agent_executor(llm, response_style, vector_store=None, web_search_only=False):
+    """Creates a more robust LangChain agent and executor."""
     tools = []
+    
+    # Conditionally add tools based on user's choice
+    if not web_search_only and vector_store:
+        retriever = vector_store.as_retriever()
+        tools.append(Tool(
+            name="document_search",
+            func=retriever.invoke,
+            description="Searches ONLY the uploaded document. You MUST use this tool FIRST for any user questions that could be related to the document."
+        ))
+    
     if TAVILY_API_KEY:
         tavily_tool = TavilySearchResults(max_results=3, api_key=TAVILY_API_KEY)
         tavily_tool.name = "search"
-        tavily_tool.description = "A search engine for current events or real-time information."
+        tavily_tool.description = "A web search engine. Use for questions about current events, general knowledge, or topics NOT found in the uploaded document."
         tools.append(tavily_tool)
-    
-    if vector_store:
-        retriever = vector_store.as_retriever()
-        tools.append(Tool(name="document_search", func=retriever.invoke, description="Searches information from the uploaded document."))
 
     prompt = hub.pull("hwchase17/react")
-    style_prompt = "Respond in a detailed, multi-paragraph format." if response_style == "Detailed" else "Respond concisely, in 3 sentences or less."
-    prompt.template = f"RESPONSE STYLE: {style_prompt}\n\n{prompt.template}"
     
+    # Add custom instructions based on the tools available
+    tool_instructions = "You have access to a web 'search' tool."
+    if not web_search_only and vector_store:
+        tool_instructions += " You also have a `document_search` tool. You MUST prioritize using the `document_search` tool for questions about the document."
+
+    prompt.template = prompt.template.replace(
+        "Think about what to do.",
+        f"Think about what to do. {tool_instructions}"
+    )
+    
+    style = "Respond in a detailed, multi-paragraph format." if response_style == "Detailed" else "Respond concisely, in 3 sentences or less."
+    prompt = prompt.partial(response_style=style)
+
     agent = create_react_agent(llm, tools, prompt)
-    return AgentExecutor(agent=agent, tools=tools, verbose=True, handle_parsing_errors=True, return_intermediate_steps=True)
+    
+    return AgentExecutor(
+        agent=agent,
+        tools=tools,
+        verbose=True,
+        handle_parsing_errors="I had trouble understanding that. Could you please rephrase?",
+        return_intermediate_steps=True,
+        max_iterations=25,
+        early_stopping_method="generate"
+    )
 
 
 # --- UI Rendering ---
@@ -95,26 +124,32 @@ def render_sidebar():
     """Renders the sidebar UI and returns user settings."""
     with st.sidebar:
         st.header("⚙️ Settings")
+        
         available_providers = [p for p, d in PROVIDER_MAP.items() if d["key"]]
         if not available_providers:
-            st.error("No LLM API keys found! Add them to your environment secrets.")
+            st.error("No LLM API keys found!")
             st.stop()
         
         provider = st.selectbox("LLM Provider", available_providers)
         model_name = st.selectbox("Model", PROVIDER_MAP[provider]["models"])
         temperature = st.slider("Temperature", 0.0, 1.0, 0.7, 0.05)
+        
         st.divider()
-        st.header("📄 RAG Document")
-        uploaded_file = st.file_uploader("Upload (.pdf, .docx, .txt)", type=["pdf", "docx", "txt"])
+        st.header("📄 Document & Search")
+        uploaded_file = st.file_uploader("Upload a document (.pdf, .docx, .txt)", type=["pdf", "docx", "txt"])
+        web_search_only = st.toggle("Web Search Only", value=False, help="If enabled, the bot will only use web search and ignore the document.")
+        
         st.divider()
         st.header("Interface")
         response_style = st.radio("Response Style", ["Concise", "Detailed"], horizontal=True)
         tts_enabled = st.toggle("Enable Voice Reader 📢", value=False)
+        
         st.divider()
         if st.button("🗑️ Clear Chat History", use_container_width=True):
-            st.session_state.clear(); st.rerun()
+            st.session_state.clear()
+            st.rerun()
 
-    return provider, model_name, temperature, response_style, tts_enabled, uploaded_file
+    return provider, model_name, temperature, response_style, tts_enabled, uploaded_file, web_search_only
 
 
 # --- Core Logic Functions ---
@@ -124,7 +159,6 @@ def handle_document_upload(uploaded_file):
         file_hash = hashlib.md5(uploaded_file.getvalue()).hexdigest()
         if st.session_state.uploaded_file_hash != file_hash:
             with st.spinner("📄 Processing document..."):
-                # Use a secure temporary file
                 with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(uploaded_file.name)[-1]) as tmp:
                     tmp.write(uploaded_file.getvalue())
                     tmp_path = tmp.name
@@ -138,9 +172,41 @@ def handle_document_upload(uploaded_file):
                     st.sidebar.error(f"Error: {e}")
                 finally:
                     if os.path.exists(tmp_path):
-                        os.remove(tmp_path) # Clean up the temp file
+                        os.remove(tmp_path)
 
-def handle_chat_interaction(prompt, llm, response_style, tts_enabled):
+def display_sources(intermediate_steps):
+    """Displays the sources and thought process of the agent in a readable format."""
+    with st.expander("🔍 View Sources"):
+        if not intermediate_steps:
+            st.info("No sources were used for this response.")
+            return
+
+        for i, step in enumerate(intermediate_steps):
+            action, observation = step
+            with st.container(border=True):
+                st.markdown(f"**Step {i+1}: Using tool `{action.tool}`**")
+                st.markdown(f"**Tool Input:**")
+                st.code(action.log.split('Action Input:')[1].strip(), language='text')
+                st.markdown("**Observation:**")
+                st.info(observation)
+
+def stream_agent_response(agent_executor, prompt) -> Generator:
+    """Streams the agent's response and yields the output and intermediate steps."""
+    full_response = ""
+    intermediate_steps = []
+
+    # Use .stream() for real-time output
+    for chunk in agent_executor.stream({"input": prompt, "chat_history": st.session_state.messages}):
+        if "output" in chunk:
+            output_chunk = chunk["output"]
+            full_response += output_chunk
+            yield {"output": output_chunk}
+        elif "intermediate_steps" in chunk:
+            intermediate_steps = chunk["intermediate_steps"]
+    
+    yield {"full_response": full_response, "intermediate_steps": intermediate_steps}
+
+def handle_chat_interaction(prompt, llm, response_style, tts_enabled, web_search_only):
     """Handles the user's chat prompt, invokes the agent, and displays the response."""
     st.session_state.messages.append(HumanMessage(content=prompt))
     with st.chat_message("user"):
@@ -148,27 +214,39 @@ def handle_chat_interaction(prompt, llm, response_style, tts_enabled):
 
     with st.chat_message("assistant"):
         try:
-            agent_executor = create_agent_executor(llm, response_style, st.session_state.vector_store)
-            with st.spinner("🧠 Thinking..."):
-                response = agent_executor.invoke({"input": prompt, "chat_history": st.session_state.messages})
+            agent_executor = create_agent_executor(llm, response_style, st.session_state.vector_store, web_search_only)
             
-            output = response.get("output", "I encountered an error.")
-            st.markdown(output)
+            with st.spinner("🧠 Thinking..."):
+                # Write the streamed response
+                stream_generator = stream_agent_response(agent_executor, prompt)
+                
+                # Use st.write_stream to render the output in real-time
+                def response_generator():
+                    for chunk in stream_generator:
+                        if "output" in chunk:
+                            yield chunk["output"]
+                        else:
+                            # This is the final chunk with the full response and steps
+                            st.session_state.final_response_data = chunk
 
-            if tts_enabled:
+                st.write_stream(response_generator)
+            
+            final_data = st.session_state.get("final_response_data", {})
+            full_response = final_data.get("full_response", "An error occurred.")
+            intermediate_steps = final_data.get("intermediate_steps", [])
+            
+            st.session_state.messages.append(AIMessage(content=full_response))
+            
+            display_sources(intermediate_steps)
+
+            if tts_enabled and full_response:
                 try:
-                    tts = gTTS(text=output, lang='en')
+                    tts = gTTS(text=full_response, lang='en')
                     fp = BytesIO()
                     tts.write_to_fp(fp)
                     st.audio(fp.getvalue(), format="audio/mp3")
                 except Exception as e:
                     st.error(f"Text-to-speech failed: {e}")
-
-            if response.get("intermediate_steps"):
-                with st.expander("🔍 View Sources"):
-                    st.json(response["intermediate_steps"])
-            
-            st.session_state.messages.append(AIMessage(content=output))
 
         except (OpenAIRateLimitError, ResourceExhausted, GroqRateLimitError) as e:
             error_message = f"**API Quota Exceeded:** Please check your billing details or try another provider. Error: {e}"
@@ -183,9 +261,9 @@ def handle_chat_interaction(prompt, llm, response_style, tts_enabled):
 # --- Main Application ---
 def main():
     """Main function to run the Streamlit app."""
-    st.title("🤖 AI Mentor Chatbot")
+    st.title("🤖 Basic Chatbot")
 
-    provider, model_name, temperature, response_style, tts_enabled, uploaded_file = render_sidebar()
+    provider, model_name, temperature, response_style, tts_enabled, uploaded_file, web_search_only = render_sidebar()
     
     handle_document_upload(uploaded_file)
 
@@ -197,7 +275,7 @@ def main():
     if prompt := st.chat_input("Ask your question here..."):
         try:
             llm = get_llm(provider, model_name, temperature)
-            handle_chat_interaction(prompt, llm, response_style, tts_enabled)
+            handle_chat_interaction(prompt, llm, response_style, tts_enabled, web_search_only)
         except Exception as e:
             st.error(f"Failed to initialize the language model: {e}")
 
