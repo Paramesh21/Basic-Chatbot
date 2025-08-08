@@ -1,19 +1,15 @@
 # models/embeddings.py
-import os
-import certifi
-import logging
+
 from langchain_huggingface import HuggingFaceEmbeddings
 
-# CRITICAL FIX: Set the SSL_CERT_FILE environment variable to use certifi's bundle
-os.environ['SSL_CERT_FILE'] = certifi.where()
-
-logging.basicConfig(filename='error.log', level=logging.ERROR, format='%(asctime)s - %(levelname)s - %(message)s')
-
-def get_huggingface_embeddings():
-    """Initialize and return HuggingFace embeddings."""
+def get_embedding_model():
+    """
+    Initializes and returns the HuggingFace embedding model.
+    The model used is 'all-MiniLM-L6-v2', which is lightweight and effective.
+    """
     try:
-        embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
-        return embeddings
+        # Uses sentence-transformers/all-MiniLM-L6-v2 model
+        return HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
     except Exception as e:
-        logging.error(f"Failed to initialize HuggingFace embeddings: {e}")
-        raise RuntimeError(f"Failed to initialize HuggingFace embeddings. This may be due to a network issue or an invalid model name. See error.log for details.") from e
+        # Raise a more informative error if model loading fails
+        raise RuntimeError(f"Failed to load embedding model: {e}") from e
