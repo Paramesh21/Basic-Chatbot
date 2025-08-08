@@ -13,7 +13,7 @@ langchain-huggingface==0.0.3
 langchainhub==0.1.18
 
 # RAG & Document Processing
-chromadb==0.5.4
+faiss-cpu==1.7.4  # <-- FIX: Using FAISS for cloud stability
 sentence-transformers==2.7.0
 pypdf==4.2.0
 unstructured[docx]
