@@ -131,4 +131,134 @@ def render_sidebar():
         # Show file preview only if text file
         if uploaded_file and uploaded_file.type == "text/plain":
             preview = uploaded_file.getvalue().decode("utf-8", errors="ignore").splitlines()
-            st.text_area("Preview", "\n".join(preview[:1
+            st.text_area("Preview", "\n".join(preview[:10]), height=120, disabled=True)
+        with st.expander("RAG Configuration"):
+            chunk_size = st.slider("Chunk Size", 500, 2000, 1000)
+            chunk_overlap = st.slider("Chunk Overlap", 0, 500, 200)
+        st.divider()
+        st.header("Interface")
+        response_mode = st.radio("Response Style", ["Concise", "Detailed"], horizontal=True)
+        tts_enabled = st.toggle("Enable Voice Reader 📢", value=st.session_state.get("tts_enabled", False))
+        st.session_state.tts_enabled = tts_enabled
+        st.divider()
+        if st.button("🗑️ Clear Chat History", use_container_width=True, type="primary"):
+            for key in ["messages", "vector_store", "uploaded_file_path", "uploaded_file_hash"]:
+                if key in st.session_state:
+                    del st.session_state[key]
+            st.rerun()
+        return uploaded_file, chunk_size, chunk_overlap, provider, model_name, temperature, response_mode
+
+# --- Text-to-Speech ---
+def text_to_speech(text):
+    try:
+        tts = gTTS(text=text, lang='en')
+        fp = BytesIO()
+        tts.write_to_fp(fp)
+        fp.seek(0)
+        return fp.read()
+    except Exception as e:
+        logging.error(f"TTS failed: {e}")
+        st.warning("Voice output unavailable.")
+        return None
+
+# --- Main App Logic ---
+def main():
+    st.title("🤖 AI Mentor Chatbot")
+    uploaded_file, chunk_size, chunk_overlap, provider, model_name, temperature, response_mode = render_sidebar()
+
+    # --- File Upload & Vector Store (RAG) ---
+    if uploaded_file:
+        if uploaded_file.size > 15 * 1024 * 1024:
+            st.error("File too large (limit: 15MB).")
+            st.stop()
+        file_content = uploaded_file.getvalue()
+        file_hash = hashlib.md5(file_content).hexdigest()
+        if st.session_state.get("uploaded_file_hash") != file_hash:
+            with st.spinner("📄 Processing document..."):
+                temp_path = save_uploaded_file(uploaded_file)
+                st.session_state.uploaded_file_path = temp_path
+                st.session_state.uploaded_file_hash = file_hash
+                vec_store = create_vector_store_cached(file_hash, chunk_size, chunk_overlap)
+                if vec_store is None:
+                    st.error("Failed to process file. Try a different document or format.")
+                    return
+                st.session_state.vector_store = vec_store
+            st.success("Document processed!")
+    elif "uploaded_file_path" in st.session_state and not os.path.exists(st.session_state["uploaded_file_path"]):
+        for key in ["vector_store", "uploaded_file_path", "uploaded_file_hash"]:
+            st.session_state.pop(key, None)
+
+    # --- Welcome message ---
+    if not st.session_state["messages"]:
+        st.info("Welcome! Ask a question or upload a document for RAG.")
+
+    # --- Message Display ---
+    for msg in st.session_state["messages"]:
+        role = "user" if isinstance(msg, HumanMessage) else "assistant"
+        with st.chat_message(role):
+            st.markdown(msg.content)
+
+    # --- Provider Key Check ---
+    is_provider_ready = PROVIDER_MAP[provider]["key"]
+    if not is_provider_ready:
+        st.warning(f"The selected provider '{provider}' is missing an API key. Please add it to your .env file.")
+        st.chat_input(f"Please configure the '{provider}' API key to chat.", disabled=True)
+        st.stop()
+
+    # --- Chat Input ---
+    if prompt := st.chat_input("Ask your question here..."):
+        prompt = prompt.strip()
+        if not prompt:
+            st.warning("Please enter a question.")
+            st.stop()
+        
+        st.session_state["messages"].append(HumanMessage(content=prompt))
+        st.chat_message("user").markdown(prompt)
+        
+        with st.chat_message("assistant"):
+            output = ""
+            try:
+                with st.spinner("🧠 Thinking..."):
+                    chat_model = get_llm_model(provider, model_name, temperature=temperature)
+                    vector_store = st.session_state.get("vector_store")
+                    if not vector_store:
+                        from langchain_core.retrievers import BaseRetriever
+                        class DummyRetriever(BaseRetriever):
+                            def _get_relevant_documents(self, query): return []
+                        vector_store = type('obj', (object,), {'as_retriever': DummyRetriever})()
+                    
+                    agent_executor = create_agent(chat_model, vector_store, response_mode)
+                    response = agent_executor.invoke({
+                        "input": prompt,
+                        "chat_history": st.session_state["messages"][-10:]
+                    })
+                    output = response.get("output", "Sorry, I couldn't answer that.")
+                    st.markdown(output)
+
+                    if st.session_state.get("tts_enabled"):
+                        audio_bytes = text_to_speech(output)
+                        if audio_bytes:
+                            st.audio(audio_bytes, format="audio/mp3")
+                    
+                    if response.get("intermediate_steps"):
+                        with st.expander("🔍 View Sources", expanded=False):
+                            for i, (agent_action, result) in enumerate(response["intermediate_steps"]):
+                                st.info(f"**Tool Used:** `{agent_action.tool}`")
+                                # FIX: Only call st.json on dicts/lists
+                                if isinstance(result, (dict, list)):
+                                    st.json(result, key=f"source_json_{i}")
+                                else:
+                                    st.text_area("Retrieved Content:", value=str(result), height=150, key=f"source_text_{i}")
+                
+                st.session_state["messages"].append(AIMessage(content=output))
+            except (GroqRateLimitError, OpenAIRateLimitError, ResourceExhausted) as e:
+                error_message = f"⚠️ API Quota Exceeded for {provider}: {e}"
+                st.error(error_message)
+                st.session_state["messages"].append(AIMessage(content=error_message))
+            except Exception as e:
+                error_message = f"An unexpected error occurred: {e}"
+                st.error(error_message)
+                st.session_state["messages"].append(AIMessage(content=error_message))
+
+if __name__ == "__main__":
+    main()
