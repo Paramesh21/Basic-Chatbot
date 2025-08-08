@@ -1,44 +1,49 @@
 # utils/rag_utils.py
+
 import os
-from langchain_community.vectorstores import FAISS
+from langchain_community.vectorstores import Chroma
 from langchain.text_splitter import RecursiveCharacterTextSplitter
-from langchain_community.document_loaders import PyPDFLoader, UnstructuredFileLoader
+from langchain_community.document_loaders import UnstructuredFileLoader
 
-SUPPORTED_EXTENSIONS = [".pdf", ".docx", ".txt"]
+def create_vector_store_from_upload(uploaded_file, embeddings):
+    """
+    Creates a Chroma vector store from an uploaded file.
 
-def get_vector_store(file_path: str, chunk_size: int, chunk_overlap: int, embeddings):
-    """Creates a FAISS vector store from a file, using robust loaders."""
-    file_extension = os.path.splitext(file_path)[1].lower()
+    Args:
+        uploaded_file: The file-like object from Streamlit's file uploader.
+        embeddings: The embedding model instance to use.
 
-    if file_extension not in SUPPORTED_EXTENSIONS:
-        raise ValueError(f"Unsupported file type: '{file_extension}'.")
+    Returns:
+        A Chroma vector store instance, or None if processing fails.
+    """
+    if not uploaded_file:
+        return None
 
     try:
-        if file_extension == ".pdf":
-            loader = PyPDFLoader(file_path, extract_images=False)
-        else:
-            loader = UnstructuredFileLoader(file_path)
+        # Save the uploaded file to a temporary location to be read by the loader
+        with open(uploaded_file.name, "wb") as f:
+            f.write(uploaded_file.getbuffer())
 
+        # Use UnstructuredFileLoader, which handles .pdf, .docx, and .txt
+        loader = UnstructuredFileLoader(uploaded_file.name)
         documents = loader.load()
-        if not documents:
-            raise ValueError(f"No content could be loaded from '{os.path.basename(file_path)}'.")
 
-        text_splitter = RecursiveCharacterTextSplitter(chunk_size=chunk_size, chunk_overlap=chunk_overlap)
+        if not documents:
+            raise ValueError("The document is empty or could not be loaded.")
+
+        # Split the document into smaller chunks for better retrieval
+        text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
         chunks = text_splitter.split_documents(documents)
 
-        # Use FAISS for cloud compatibility
-        return FAISS.from_documents(documents=chunks, embedding=embeddings)
+        # Create the Chroma vector store from the document chunks
+        vector_store = Chroma.from_documents(documents=chunks, embedding=embeddings)
+
+        return vector_store
 
     except Exception as e:
-        raise RuntimeError(f"Failed to create vector store for '{os.path.basename(file_path)}': {e}") from e
-
-def format_docs_with_sources(docs: list) -> str:
-    """Formats retrieved documents with source information."""
-    if not docs:
-        return "No relevant content found in the document."
-        
-    return "\n\n".join(
-        f"Source: {os.path.basename(doc.metadata.get('source', 'Unknown'))}\n"
-        f"Content: {doc.page_content}"
-        for doc in docs
-    )
+        print(f"Error creating vector store: {e}")
+        return None
+    finally:
+        # Clean up the temporary file
+        if os.path.exists(uploaded_file.name):
+            os.remove(uploaded_file.name)
