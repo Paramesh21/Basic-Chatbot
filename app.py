@@ -30,7 +30,9 @@ def load_embedding_model():
     """Loads the embedding model and caches it."""
     return get_embedding_model()
 
-@st.cache_data(show_spinner="Processing document...")
+# THE FIX: Removed the conflicting @st.cache_data decorator from this function.
+# The app already uses st.session_state for caching the processed document,
+# which is the correct way to handle complex objects like file uploads.
 def process_document(_file, embeddings):
     """Processes the uploaded document and creates a cached vector store."""
     return create_vector_store_from_upload(_file, embeddings)
