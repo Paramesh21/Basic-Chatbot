@@ -2,7 +2,7 @@
 
 # --- Streamlit Page Config: MUST BE FIRST Streamlit command ---
 import streamlit as st
-st.set_page_config(page_title="Basic Chatbot", page_icon="🤖", layout="wide")
+st.set_page_config(page_title="AI Mentor Chatbot", page_icon="🤖", layout="wide")
 
 
 # --- Hot-patch for sqlite3 on Streamlit Cloud ---
