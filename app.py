@@ -20,6 +20,7 @@ import certifi
 import nltk
 import tempfile
 import time
+from datetime import datetime
 from typing import Generator, List, Dict, Any
 from queue import Queue
 
@@ -63,11 +64,9 @@ class StreamlitCallbackHandler(BaseCallbackHandler):
         self.log_queue = Queue()
 
     def on_agent_action(self, action, **kwargs):
-        # Push the agent's 'thought' process to the queue
         self.log_queue.put(f"🤔 **Thought:**\n{action.log.strip()}")
 
     def on_tool_end(self, output, **kwargs):
-        # Push the observation from the tool to the queue
         self.log_queue.put(f"✅ **Observation:**\n{output}")
 
 
@@ -104,10 +103,22 @@ def create_vector_store_cached(_file_hash, chunk_size, chunk_overlap, uploaded_f
         st.error(f"Failed to create vector store: {e}")
         return None
 
+
 # --- Agent & Tool Creation ---
+def get_current_date(tool_input=""):
+    """A simple tool to get the current date."""
+    return datetime.now().strftime("%A, %B %d, %Y")
+
 def create_agent_executor(llm, response_style, memory, vector_store=None, web_search_only=False):
     """Creates a more robust LangChain agent and executor with dynamic prompts."""
     tools = []
+    
+    # Add the date tool by default
+    tools.append(Tool(
+        name="get_current_date",
+        func=get_current_date,
+        description="Use this tool to get the current date when the user asks for it."
+    ))
     
     has_document_tool = not web_search_only and vector_store
     
@@ -125,20 +136,44 @@ def create_agent_executor(llm, response_style, memory, vector_store=None, web_se
         tavily_tool.description = "A general web search engine. Use this ONLY if the document_search tool fails to find a relevant answer."
         tools.append(tavily_tool)
 
-    prompt = hub.pull("hwchase17/react")
+    # This prompt template is heavily modified for reliability
+    prompt_template = """
+    You are a helpful assistant named Basic Bot. You have access to the following tools: {tools}
     
-    if has_document_tool:
-        tool_instructions = "You MUST prioritize using the `document_search` tool for questions about the uploaded document. Only use the web 'search' tool if the answer is not found in the document."
-    else:
-        tool_instructions = "You only have access to a web 'search' tool."
+    Use the following format:
+    Thought: Do I need to use a tool? Yes
+    Action: The action to take, should be one of [{tool_names}]
+    Action Input: The input to the action
+    Observation: The result of the action
 
-    prompt.template = prompt.template.replace(
-        "Think about what to do.",
-        f"Think about what to do. {tool_instructions}"
-    )
+    When you have a response to say to the Human, or if you do not need to use a tool, you MUST use the format:
+    Thought: Do I need to use a tool? No
+    Final Answer: [your response here]
+
+    **CRITICAL INSTRUCTIONS:**
+    1.  **Pre-flight Check**: First, analyze the user's input. If it is a simple greeting (like "hi", "hello"), a thank you, or a simple conversational filler, you MUST respond directly without using any tools.
+    2.  **Prioritize the Document**: If the query is not a simple greeting and the `document_search` tool is available, you **MUST** use it as your first action.
+    3.  **Use Web Search as a Fallback**: You are only permitted to use the `search` tool if the `document_search` observation is empty or clearly does not contain the answer.
+    4.  **Use Date Tool When Asked**: Only use the `get_current_date` tool if the user explicitly asks for today's date.
+
+    RESPONSE STYLE: {response_style}
+
+    Begin!
+
+    Previous conversation history:
+    {chat_history}
+
+    New input: {input}
+    {agent_scratchpad}
+    """
     
-    style = "Respond in a detailed, multi-paragraph format." if response_style == "Detailed" else "Respond concisely, in 3 sentences or less."
-    prompt = prompt.partial(response_style=style)
+    # BUG FIX: Corrected the logic for response style
+    style = "Respond concisely, in 3 sentences or less." if response_style == "Concise" else "Respond in a detailed, multi-paragraph format."
+    
+    prompt = hub.pull("hwchase17/react").partial(
+        template=prompt_template,
+        response_style=style
+    )
 
     agent = create_react_agent(llm, tools, prompt)
     
@@ -203,6 +238,7 @@ def handle_document_upload(uploaded_file, chunk_size, chunk_overlap):
     """Processes an uploaded file and updates the vector store in session state."""
     if uploaded_file:
         file_hash = hashlib.md5(uploaded_file.getvalue()).hexdigest()
+        # Check if the file is new or RAG parameters have changed
         if st.session_state.uploaded_file_hash != file_hash:
             start_time = time.time()
             with st.spinner("📄 Processing document..."):
@@ -275,6 +311,7 @@ def stream_agent_response(agent_executor, prompt, callback_handler) -> Generator
 
 def handle_chat_interaction(prompt, llm, response_style, tts_enabled, web_search_only):
     """Handles the user's chat prompt, invokes the agent, and displays the response."""
+    # Add user message to the UI and memory
     st.session_state.messages.append(HumanMessage(content=prompt))
     st.session_state.is_generating = True
     st.session_state.interrupt_generation = False
@@ -285,10 +322,10 @@ def handle_chat_interaction(prompt, llm, response_style, tts_enabled, web_search
     with st.chat_message("assistant"):
         start_time = time.time()
         
+        # UI elements for generation process
         response_placeholder = st.empty()
         log_expander = st.expander("🤖 Live Thought Process...")
         log_placeholder = log_expander.empty()
-        
         st.button("Stop Generation", key="stop_button", on_click=lambda: st.session_state.update(interrupt_generation=True))
 
         try:
@@ -311,22 +348,13 @@ def handle_chat_interaction(prompt, llm, response_style, tts_enabled, web_search
                     final_data = chunk
 
             response_placeholder.markdown(full_response)
-            st.session_state.memory.save_context({"input": prompt}, {"output": full_response})
-            st.session_state.messages.append(AIMessage(content=full_response))
             
-            response_time = time.time() - start_time
-            st.caption(f"Response generated in {response_time:.2f} seconds.")
-
-            display_final_sources(final_data.get("intermediate_steps", []))
-
-            if tts_enabled and full_response:
-                try:
-                    tts = gTTS(text=full_response, lang='en')
-                    fp = BytesIO()
-                    tts.write_to_fp(fp)
-                    st.audio(fp.getvalue(), format="audio/mp3")
-                except Exception as e:
-                    st.error(f"TTS failed: {e}")
+            # Save context to memory and messages for display
+            st.session_state.memory.save_context({"input": prompt}, {"output": full_response})
+            ai_message = AIMessage(content=full_response)
+            # BUG FIX: Store intermediate steps with the message
+            ai_message.additional_kwargs = {"intermediate_steps": final_data.get("intermediate_steps", [])}
+            st.session_state.messages.append(ai_message)
 
         except (OpenAIRateLimitError, ResourceExhausted, GroqRateLimitError) as e:
             error_message = f"**API Quota Exceeded:** Please check your billing details. Error: {e}"
@@ -337,6 +365,7 @@ def handle_chat_interaction(prompt, llm, response_style, tts_enabled, web_search
             st.error(error_message)
             st.session_state.messages.append(AIMessage(content=error_message))
         finally:
+            # Clean up and rerun
             st.session_state.is_generating = False
             st.rerun()
 
@@ -350,11 +379,17 @@ def main():
     
     handle_document_upload(uploaded_file, chunk_size, chunk_overlap)
 
-    for message in st.session_state.messages:
+    # Display chat history from session state
+    for i, message in enumerate(st.session_state.messages):
         role = "assistant" if isinstance(message, AIMessage) else "user"
         with st.chat_message(role):
             st.markdown(message.content)
+            # BUG FIX: Display sources for the last AI message if they exist
+            if isinstance(message, AIMessage) and i == len(st.session_state.messages) - 1:
+                if "intermediate_steps" in message.additional_kwargs:
+                    display_final_sources(message.additional_kwargs["intermediate_steps"])
 
+    # Handle the chat input logic
     if st.session_state.is_generating:
         st.chat_input("Ask your question here...", disabled=True)
     elif prompt := st.chat_input("Ask your question here..."):
