@@ -79,7 +79,6 @@ def initialize_session_state():
         "uploaded_file_hash": None,
         "is_generating": False,
         "interrupt_generation": False,
-        "tts_enabled": False,
         "memory": ConversationBufferWindowMemory(
             k=5, return_messages=True, memory_key="chat_history", output_key="output"
         )
@@ -101,6 +100,7 @@ def create_agent_executor(llm, response_style, memory, vector_store=None, web_se
     """Creates a more robust LangChain agent and executor with dynamic prompts."""
     tools = []
     
+    # FIX: Dynamically create the prompt based on available tools
     has_document_tool = not web_search_only and vector_store
     
     if has_document_tool:
@@ -197,7 +197,7 @@ def handle_document_upload(uploaded_file):
             st.session_state.uploaded_file_hash = hashlib.md5(uploaded_file.getvalue()).hexdigest()
             
             try:
-                embeddings = load_embedding_model()
+                embeddings = get_embeddings_model_cached()
                 st.session_state.vector_store = create_vector_store_cached(
                     st.session_state.uploaded_file_hash, 1000, 200, st.session_state.uploaded_file_path
                 )
@@ -214,7 +214,7 @@ def handle_document_upload(uploaded_file):
 @st.cache_data(max_entries=5, ttl=3600, show_spinner="Creating vector store...")
 def create_vector_store_cached(_file_hash, chunk_size, chunk_overlap, uploaded_file_path):
     try:
-        embeddings = load_embedding_model()
+        embeddings = get_embeddings_model_cached()
         return create_vector_store_from_upload(uploaded_file_path, chunk_size, chunk_overlap, embeddings)
     except Exception as e:
         st.error(f"Failed to create vector store: {e}")
@@ -282,9 +282,11 @@ def handle_chat_interaction(prompt, llm, response_style, tts_enabled, web_search
         
         response_placeholder = st.empty()
         
+        # Setup for live logging
         log_expander = st.expander("🤖 Live Thought Process...")
         log_placeholder = log_expander.empty()
         
+        # Interrupt button
         st.button("Stop Generation", key="stop_button", on_click=lambda: st.session_state.update(interrupt_generation=True))
 
         try:
@@ -337,6 +339,7 @@ def handle_chat_interaction(prompt, llm, response_style, tts_enabled, web_search
             st.session_state.messages.append(AIMessage(content=error_message))
         finally:
             st.session_state.is_generating = False
+            # Rerun to clear the "Stop" button and "Live Log" expander
             st.rerun()
 
 
@@ -349,6 +352,7 @@ def main():
     
     handle_document_upload(uploaded_file)
 
+    # Display chat history from session state
     for message in st.session_state.messages:
         role = "assistant" if isinstance(message, AIMessage) else "user"
         with st.chat_message(role):
