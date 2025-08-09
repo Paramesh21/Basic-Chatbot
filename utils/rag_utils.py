@@ -13,7 +13,6 @@ def create_vector_store_from_upload(uploaded_file_path: str, embeddings):
         raise FileNotFoundError(f"Uploaded file not found at path: {uploaded_file_path}")
 
     try:
-        # UnstructuredFileLoader is robust for .pdf, .docx, and .txt
         loader = UnstructuredFileLoader(uploaded_file_path)
         documents = loader.load()
 
