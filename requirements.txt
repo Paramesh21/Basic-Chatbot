@@ -28,3 +28,4 @@ certifi==2024.7.4
 # Tools & Utilities
 tavily-python==0.3.3
 gtts==2.5.1
+rich==13.7.1
