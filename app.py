@@ -63,9 +63,11 @@ class StreamlitCallbackHandler(BaseCallbackHandler):
         self.log_queue = Queue()
 
     def on_agent_action(self, action, **kwargs):
+        # Push the agent's 'thought' process to the queue
         self.log_queue.put(f"🤔 **Thought:**\n{action.log.strip()}")
 
     def on_tool_end(self, output, **kwargs):
+        # Push the observation from the tool to the queue
         self.log_queue.put(f"✅ **Observation:**\n{output}")
 
 
@@ -92,8 +94,6 @@ initialize_session_state()
 def load_embedding_model():
     return get_embedding_model()
 
-# BUG FIX: The cached function must accept all parameters that change,
-# including chunk_size and chunk_overlap, to avoid using stale cache.
 @st.cache_data(max_entries=5, ttl=3600, show_spinner="Creating vector store...")
 def create_vector_store_cached(_file_hash, chunk_size, chunk_overlap, uploaded_file_path):
     """Creates and caches the vector store based on file content and RAG parameters."""
@@ -173,7 +173,6 @@ def render_sidebar():
         st.header("📄 Document & Search")
         uploaded_file = st.file_uploader("Upload a document (.pdf, .docx, .txt)", type=["pdf", "docx", "txt"])
         
-        # BUG FIX: These sliders now correctly influence the document processing.
         with st.expander("RAG Configuration"):
             chunk_size = st.slider("Chunk Size", 500, 4000, 1000, 100)
             chunk_overlap = st.slider("Chunk Overlap", 0, 500, 200, 50)
@@ -212,7 +211,6 @@ def handle_document_upload(uploaded_file, chunk_size, chunk_overlap):
                     tmp_path = tmp.name
                 
                 try:
-                    # BUG FIX: Pass the chunk_size and chunk_overlap to the cached function.
                     st.session_state.vector_store = create_vector_store_cached(
                         file_hash, chunk_size, chunk_overlap, tmp_path
                     )
@@ -348,4 +346,23 @@ def main():
     """Main function to run the Streamlit app."""
     st.title("🤖 Basic Bot")
 
-    # BUG FIX: Get chunk_size and chunk
+    provider, model_name, temperature, response_style, tts_enabled, uploaded_file, web_search_only, chunk_size, chunk_overlap = render_sidebar()
+    
+    handle_document_upload(uploaded_file, chunk_size, chunk_overlap)
+
+    for message in st.session_state.messages:
+        role = "assistant" if isinstance(message, AIMessage) else "user"
+        with st.chat_message(role):
+            st.markdown(message.content)
+
+    if st.session_state.is_generating:
+        st.chat_input("Ask your question here...", disabled=True)
+    elif prompt := st.chat_input("Ask your question here..."):
+        try:
+            llm = get_llm(provider, model_name, temperature)
+            handle_chat_interaction(prompt, llm, response_style, tts_enabled, web_search_only)
+        except Exception as e:
+            st.error(f"Failed to initialize the language model: {e}")
+
+if __name__ == "__main__":
+    main()
