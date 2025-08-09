@@ -2,7 +2,7 @@
 
 # --- Streamlit Page Config: MUST BE FIRST Streamlit command ---
 import streamlit as st
-st.set_page_config(page_title="AI Mentor Chatbot", page_icon="🤖", layout="wide")
+st.set_page_config(page_title="Basic Bot", page_icon="🤖", layout="wide")
 
 
 # --- Hot-patch for sqlite3 on Streamlit Cloud ---
@@ -20,12 +20,11 @@ import certifi
 import nltk
 import tempfile
 import time
-from typing import Generator
+from typing import Generator, List, Dict, Any
 
 from langchain_core.messages import AIMessage, HumanMessage
 from langchain.agents import create_react_agent, AgentExecutor
 from langchain.tools import Tool
-# FIX: Import ConversationBufferWindowMemory
 from langchain.memory import ConversationBufferWindowMemory
 from langchain_community.tools.tavily_search import TavilySearchResults
 from langchain import hub
@@ -61,8 +60,7 @@ def initialize_session_state():
         "messages": [],
         "vector_store": None,
         "uploaded_file_hash": None,
-        "final_response_data": None,
-        # FIX: Add memory to session state
+        "is_generating": False,
         "memory": ConversationBufferWindowMemory(
             k=5, return_messages=True, memory_key="chat_history", output_key="output"
         )
@@ -183,36 +181,41 @@ def handle_document_upload(uploaded_file):
                 st.sidebar.success(f"Document processed in {processing_time:.2f} seconds.")
             except Exception as e:
                 st.sidebar.error(f"Error processing document: {e}")
-                st.session_state.vector_store = None
+                st.session_state.vector_store = None # Ensure state is cleared on failure
                 st.session_state.uploaded_file_hash = None
             finally:
                 if os.path.exists(tmp_path):
-                    os.remove(tmp_path)
+                    os.remove(tmp_path) # Clean up the temp file
 
-def display_sources(intermediate_steps):
-    """Displays the sources and thought process of the agent in a readable format."""
-    with st.expander("🔍 View Sources"):
-        if not intermediate_steps:
-            st.info("No sources were used for this response.")
-            return
+def stream_agent_response(agent_executor, prompt) -> Generator[Dict[str, Any], None, None]:
+    """Streams the agent's response, yielding output chunks and tool usage logs."""
+    full_response = ""
+    intermediate_steps: List[Any] = []
 
-        for i, step in enumerate(intermediate_steps):
-            action, observation = step
-            with st.container(border=True):
-                st.markdown(f"**Step {i+1}: Using tool `{action.tool}`**")
-                try:
-                    tool_input = action.log.split('Action Input:')[1].strip()
-                    st.markdown(f"**Tool Input:**")
-                    st.code(tool_input, language='text')
-                except IndexError:
-                    st.markdown("**Tool Input:** `(Not available)`")
-                
-                st.markdown("**Observation:**")
-                st.info(str(observation))
+    # The .stream() method yields dictionaries for different events
+    for chunk in agent_executor.stream({"input": prompt}):
+        if st.session_state.get("interrupt_generation", False):
+            st.session_state.interrupt_generation = False
+            yield {"log": "Generation stopped by user."}
+            break
+
+        if "output" in chunk:
+            output_chunk = chunk["output"]
+            full_response += output_chunk
+            yield {"output": output_chunk}
+        elif "intermediate_steps" in chunk:
+            # This chunk contains the latest tool usage
+            latest_steps = chunk["intermediate_steps"]
+            if latest_steps:
+                action, observation = latest_steps[-1]
+                log_message = f"**Tool Used:** `{action.tool}`\n**Input:** `{action.tool_input}`\n**Observation:** {observation}"
+                yield {"log": log_message}
+            intermediate_steps = latest_steps
+    
+    yield {"full_response": full_response, "intermediate_steps": intermediate_steps}
 
 def handle_chat_interaction(prompt, llm, response_style, tts_enabled, web_search_only):
     """Handles the user's chat prompt, invokes the agent, and displays the response."""
-    # Append user message to the visual chat history
     st.session_state.messages.append(HumanMessage(content=prompt))
     
     with st.chat_message("user"):
@@ -220,29 +223,46 @@ def handle_chat_interaction(prompt, llm, response_style, tts_enabled, web_search
 
     with st.chat_message("assistant"):
         start_time = time.time()
+        st.session_state.is_generating = True
+        
+        # Placeholders for dynamic content
+        response_placeholder = st.empty()
+        log_expander = st.expander("🤖 Live Thought Process...")
+        log_placeholder = log_expander.empty()
+        
+        if st.button("Stop Generation", key="stop_button"):
+            st.session_state.interrupt_generation = True
+
         try:
-            # Use the memory from session state
             agent_executor = create_agent_executor(
                 llm, response_style, st.session_state.memory, st.session_state.vector_store, web_search_only
             )
             
-            response_placeholder = st.empty()
+            stream_generator = stream_agent_response(agent_executor, prompt)
             
-            # The agent will now automatically use the history from memory
-            response = agent_executor.invoke({"input": prompt})
+            full_response = ""
+            log_messages = []
+            intermediate_steps = []
+
+            for chunk in stream_generator:
+                if "output" in chunk:
+                    full_response += chunk["output"]
+                    response_placeholder.markdown(full_response + "▌")
+                elif "log" in chunk:
+                    log_messages.append(chunk["log"])
+                    log_placeholder.info("\n\n---\n\n".join(log_messages))
+                elif "intermediate_steps" in chunk: # Capture final steps
+                    intermediate_steps = chunk.get("intermediate_steps", [])
             
-            full_response = response.get("output", "An error occurred.")
             response_placeholder.markdown(full_response)
             
+            # Save context to memory
+            st.session_state.memory.save_context({"input": prompt}, {"output": full_response})
+            st.session_state.messages.append(AIMessage(content=full_response))
+
             response_time = time.time() - start_time
             st.caption(f"Response generated in {response_time:.2f} seconds.")
-
-            # Append AI message to the visual chat history
-            st.session_state.messages.append(AIMessage(content=full_response))
             
-            intermediate_steps = response.get("intermediate_steps", [])
-            display_sources(intermediate_steps)
-
             if tts_enabled and full_response:
                 try:
                     tts = gTTS(text=full_response, lang='en')
@@ -260,30 +280,29 @@ def handle_chat_interaction(prompt, llm, response_style, tts_enabled, web_search
             error_message = f"An unexpected error occurred: {e}"
             st.error(error_message)
             st.session_state.messages.append(AIMessage(content=error_message))
+        finally:
+            st.session_state.is_generating = False
 
 
 # --- Main Application ---
 def main():
     """Main function to run the Streamlit app."""
-    st.title("🤖 AI Mentor Chatbot")
+    st.title("🤖 Basic Bot")
 
     provider, model_name, temperature, response_style, tts_enabled, uploaded_file, web_search_only = render_sidebar()
     
     handle_document_upload(uploaded_file)
 
-    # Load messages from memory for display
-    chat_history = st.session_state.memory.load_memory_variables({}).get("chat_history", [])
-    for message in chat_history:
+    # Display chat history from session state
+    for message in st.session_state.messages:
         role = "assistant" if isinstance(message, AIMessage) else "user"
         with st.chat_message(role):
             st.markdown(message.content)
 
-    if prompt := st.chat_input("Ask your question here..."):
+    if prompt := st.chat_input("Ask your question here...", disabled=st.session_state.is_generating):
         try:
             llm = get_llm(provider, model_name, temperature)
             handle_chat_interaction(prompt, llm, response_style, tts_enabled, web_search_only)
-            # Rerun to display the new message from memory
-            st.rerun()
         except Exception as e:
             st.error(f"Failed to initialize the language model: {e}")
 
