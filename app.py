@@ -73,38 +73,60 @@ def load_embedding_model():
     return get_embedding_model()
 
 
-# --- Agent & Tool Creation ---
+# --- Agent & Tool Creation (REFINED FOR BUG FIX) ---
 def create_agent_executor(llm, response_style, vector_store=None, web_search_only=False):
     """Creates a more robust LangChain agent and executor."""
     tools = []
     
+    # Tool descriptions are critical for the agent's decision-making.
     if not web_search_only and vector_store:
         retriever = vector_store.as_retriever()
         tools.append(Tool(
             name="document_search",
             func=retriever.invoke,
-            description="Searches ONLY the uploaded document. You MUST use this tool FIRST for any user questions that could be related to the document."
+            description="Searches the user's uploaded private document. This is the primary tool for answering questions."
         ))
     
     if TAVILY_API_KEY:
         tavily_tool = TavilySearchResults(max_results=3, api_key=TAVILY_API_KEY)
         tavily_tool.name = "search"
-        tavily_tool.description = "A web search engine. Use for questions about current events, general knowledge, or topics NOT found in the uploaded document."
+        tavily_tool.description = "A general web search engine. Use this ONLY if the document_search tool fails to find a relevant answer."
         tools.append(tavily_tool)
 
-    prompt = hub.pull("hwchase17/react")
+    # This prompt template is heavily modified to force the agent to use the document first.
+    prompt_template = """
+    You are a helpful assistant. You have access to the following tools: {tools}
     
-    tool_instructions = "You have access to a web 'search' tool."
-    if not web_search_only and vector_store:
-        tool_instructions = "You MUST prioritize using the `document_search` tool for questions about the uploaded document. Only use the web 'search' tool if the answer is not found in the document."
+    Use the following format:
+    Thought: Do I need to use a tool? Yes
+    Action: The action to take, should be one of [{tool_names}]
+    Action Input: The input to the action
+    Observation: The result of the action
 
-    prompt.template = prompt.template.replace(
-        "Think about what to do.",
-        f"Think about what to do. {tool_instructions}"
-    )
+    When you have a response to say to the Human, or if you do not need to use a tool, you MUST use the format:
+    Thought: Do I need to use a tool? No
+    Final Answer: [your response here]
+
+    **CRITICAL INSTRUCTIONS:**
+    1.  **Prioritize the Document**: If the `document_search` tool is available, you **MUST** use it as your first action for any user query.
+    2.  **Analyze Document Output**: After using `document_search`, carefully analyze the 'Observation'. If it contains the answer, formulate your 'Final Answer' based **only** on that information.
+    3.  **Use Web Search as a Fallback**: You are only permitted to use the `search` tool if the `document_search` observation is empty or clearly does not contain the answer.
+
+    RESPONSE STYLE: {response_style}
+
+    Begin!
+
+    Previous conversation history:
+    {chat_history}
+
+    New input: {input}
+    {agent_scratchpad}
+    """
     
-    style = "Respond in a detailed, multi-paragraph format." if response_style == "Detailed" else "Respond concisely, in 3 sentences or less."
-    prompt = prompt.partial(response_style=style)
+    prompt = hub.pull("hwchase17/react").partial(
+        template=prompt_template,
+        response_style="Respond in a detailed, multi-paragraph format." if response_style == "Detailed" else "Respond concisely, in 3 sentences or less."
+    )
 
     agent = create_react_agent(llm, tools, prompt)
     
@@ -114,7 +136,7 @@ def create_agent_executor(llm, response_style, vector_store=None, web_search_onl
         verbose=True,
         handle_parsing_errors="I had trouble understanding that. Could you please rephrase?",
         return_intermediate_steps=True,
-        max_iterations=25,
+        max_iterations=15, # Reduced to prevent long loops on failure
         early_stopping_method="generate"
     )
 
@@ -176,7 +198,8 @@ def handle_document_upload(uploaded_file):
                 st.sidebar.success(f"Document processed in {processing_time:.2f} seconds.")
             except Exception as e:
                 st.sidebar.error(f"Error processing document: {e}")
-                st.session_state.vector_store = None # Ensure state is cleared on failure
+                st.session_state.vector_store = None
+                st.session_state.uploaded_file_hash = None # Clear hash on failure
             finally:
                 if os.path.exists(tmp_path):
                     os.remove(tmp_path)
@@ -192,7 +215,6 @@ def display_sources(intermediate_steps):
             action, observation = step
             with st.container(border=True):
                 st.markdown(f"**Step {i+1}: Using tool `{action.tool}`**")
-                # Safely extract tool input from log
                 try:
                     tool_input = action.log.split('Action Input:')[1].strip()
                     st.markdown(f"**Tool Input:**")
@@ -201,7 +223,7 @@ def display_sources(intermediate_steps):
                     st.markdown("**Tool Input:** `(Not available)`")
                 
                 st.markdown("**Observation:**")
-                st.info(observation)
+                st.info(str(observation))
 
 def stream_agent_response(agent_executor, prompt) -> Generator:
     """Streams the agent's response and yields the output and intermediate steps."""
@@ -229,13 +251,10 @@ def handle_chat_interaction(prompt, llm, response_style, tts_enabled, web_search
         try:
             agent_executor = create_agent_executor(llm, response_style, st.session_state.vector_store, web_search_only)
             
-            # Use a placeholder for the streamed response
             response_placeholder = st.empty()
             
-            # Generator for streaming
             stream_generator = stream_agent_response(agent_executor, prompt)
             
-            # Render the response in real-time
             full_response = ""
             for chunk in stream_generator:
                 if "output" in chunk:
@@ -261,10 +280,10 @@ def handle_chat_interaction(prompt, llm, response_style, tts_enabled, web_search
                     tts.write_to_fp(fp)
                     st.audio(fp.getvalue(), format="audio/mp3")
                 except Exception as e:
-                    st.error(f"Text-to-speech failed: {e}")
+                    st.error(f"TTS failed: {e}")
 
         except (OpenAIRateLimitError, ResourceExhausted, GroqRateLimitError) as e:
-            error_message = f"**API Quota Exceeded:** Please check your billing details or try another provider. Error: {e}"
+            error_message = f"**API Quota Exceeded:** Please check your billing details. Error: {e}"
             st.error(error_message)
             st.session_state.messages.append(AIMessage(content=error_message))
         except Exception as e:
