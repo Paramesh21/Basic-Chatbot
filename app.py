@@ -272,6 +272,7 @@ def handle_chat_interaction(prompt, llm, response_style, tts_enabled, web_search
             st.error(error_message)
             st.session_state.messages.append(AIMessage(content=error_message))
 
+
 # --- Main Application ---
 def main():
     """Main function to run the Streamlit app."""
