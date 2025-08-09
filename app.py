@@ -63,9 +63,11 @@ class StreamlitCallbackHandler(BaseCallbackHandler):
         self.log_queue = Queue()
 
     def on_agent_action(self, action, **kwargs):
+        # Push the agent's 'thought' process to the queue
         self.log_queue.put(f"🤔 **Thought:**\n{action.log.strip()}")
 
     def on_tool_end(self, output, **kwargs):
+        # Push the observation from the tool to the queue
         self.log_queue.put(f"✅ **Observation:**\n{output}")
 
 
@@ -92,7 +94,6 @@ initialize_session_state()
 def load_embedding_model():
     return get_embedding_model()
 
-# BUG FIX: Changed from st.cache_data to st.cache_resource to handle unserializable objects
 @st.cache_resource(max_entries=5, ttl=3600, show_spinner="Creating vector store...")
 def create_vector_store_cached(_file_hash, chunk_size, chunk_overlap, uploaded_file_path):
     """Creates and caches the vector store based on file content and RAG parameters."""
@@ -210,7 +211,6 @@ def handle_document_upload(uploaded_file, chunk_size, chunk_overlap):
                     tmp_path = tmp.name
                 
                 try:
-                    # BUG FIX: Pass the chunk_size and chunk_overlap to the cached function.
                     st.session_state.vector_store = create_vector_store_cached(
                         file_hash, chunk_size, chunk_overlap, tmp_path
                     )
