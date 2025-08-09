@@ -63,11 +63,9 @@ class StreamlitCallbackHandler(BaseCallbackHandler):
         self.log_queue = Queue()
 
     def on_agent_action(self, action, **kwargs):
-        # Push the agent's 'thought' process to the queue
         self.log_queue.put(f"🤔 **Thought:**\n{action.log.strip()}")
 
     def on_tool_end(self, output, **kwargs):
-        # Push the observation from the tool to the queue
         self.log_queue.put(f"✅ **Observation:**\n{output}")
 
 
@@ -79,7 +77,6 @@ def initialize_session_state():
         "uploaded_file_hash": None,
         "is_generating": False,
         "interrupt_generation": False,
-        "tts_enabled": False,
         "memory": ConversationBufferWindowMemory(
             k=5, return_messages=True, memory_key="chat_history", output_key="output"
         )
@@ -95,13 +92,23 @@ initialize_session_state()
 def load_embedding_model():
     return get_embedding_model()
 
+# BUG FIX: The cached function must accept all parameters that change,
+# including chunk_size and chunk_overlap, to avoid using stale cache.
+@st.cache_data(max_entries=5, ttl=3600, show_spinner="Creating vector store...")
+def create_vector_store_cached(_file_hash, chunk_size, chunk_overlap, uploaded_file_path):
+    """Creates and caches the vector store based on file content and RAG parameters."""
+    try:
+        embeddings = load_embedding_model()
+        return create_vector_store_from_upload(uploaded_file_path, chunk_size, chunk_overlap, embeddings)
+    except Exception as e:
+        st.error(f"Failed to create vector store: {e}")
+        return None
 
 # --- Agent & Tool Creation ---
 def create_agent_executor(llm, response_style, memory, vector_store=None, web_search_only=False):
     """Creates a more robust LangChain agent and executor with dynamic prompts."""
     tools = []
     
-    # FIX: Dynamically create the prompt based on available tools
     has_document_tool = not web_search_only and vector_store
     
     if has_document_tool:
@@ -165,6 +172,12 @@ def render_sidebar():
         st.divider()
         st.header("📄 Document & Search")
         uploaded_file = st.file_uploader("Upload a document (.pdf, .docx, .txt)", type=["pdf", "docx", "txt"])
+        
+        # BUG FIX: These sliders now correctly influence the document processing.
+        with st.expander("RAG Configuration"):
+            chunk_size = st.slider("Chunk Size", 500, 4000, 1000, 100)
+            chunk_overlap = st.slider("Chunk Overlap", 0, 500, 200, 50)
+
         web_search_only = st.toggle(
             "Web Search Only", value=False,
             help="If enabled, the bot will only use web search and ignore the document.",
@@ -176,50 +189,43 @@ def render_sidebar():
         st.divider()
         st.header("Interface")
         response_style = st.radio("Response Style", ["Concise", "Detailed"], horizontal=True)
-        tts_enabled = st.toggle("Enable Voice Reader 📢", value=st.session_state.tts_enabled)
+        tts_enabled = st.toggle("Enable Voice Reader 📢", value=False)
         
         st.divider()
         if st.button("🗑️ Clear Chat History", use_container_width=True, type="primary"):
             st.session_state.clear()
             st.rerun()
 
-    return provider, model_name, temperature, response_style, tts_enabled, uploaded_file, web_search_only
+    return provider, model_name, temperature, response_style, tts_enabled, uploaded_file, web_search_only, chunk_size, chunk_overlap
 
 
 # --- Core Logic Functions ---
-def handle_document_upload(uploaded_file):
+def handle_document_upload(uploaded_file, chunk_size, chunk_overlap):
     """Processes an uploaded file and updates the vector store in session state."""
-    if uploaded_file and st.session_state.get("uploaded_file_hash") != hashlib.md5(uploaded_file.getvalue()).hexdigest():
-        start_time = time.time()
-        with st.spinner("📄 Processing document..."):
-            with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(uploaded_file.name)[-1]) as tmp:
-                tmp.write(uploaded_file.getvalue())
-                st.session_state.uploaded_file_path = tmp.name
-            st.session_state.uploaded_file_hash = hashlib.md5(uploaded_file.getvalue()).hexdigest()
-            
-            try:
-                embeddings = get_embeddings_model_cached()
-                st.session_state.vector_store = create_vector_store_cached(
-                    st.session_state.uploaded_file_hash, 1000, 200, st.session_state.uploaded_file_path
-                )
-                processing_time = time.time() - start_time
-                st.sidebar.success(f"Document processed in {processing_time:.2f} seconds.")
-            except Exception as e:
-                st.sidebar.error(f"Error processing document: {e}")
-                st.session_state.vector_store = None
-                st.session_state.uploaded_file_hash = None
-            finally:
-                if 'uploaded_file_path' in st.session_state and os.path.exists(st.session_state.uploaded_file_path):
-                    os.remove(st.session_state.uploaded_file_path)
-
-@st.cache_data(max_entries=5, ttl=3600, show_spinner="Creating vector store...")
-def create_vector_store_cached(_file_hash, chunk_size, chunk_overlap, uploaded_file_path):
-    try:
-        embeddings = get_embeddings_model_cached()
-        return create_vector_store_from_upload(uploaded_file_path, chunk_size, chunk_overlap, embeddings)
-    except Exception as e:
-        st.error(f"Failed to create vector store: {e}")
-        return None
+    if uploaded_file:
+        file_hash = hashlib.md5(uploaded_file.getvalue()).hexdigest()
+        if st.session_state.uploaded_file_hash != file_hash:
+            start_time = time.time()
+            with st.spinner("📄 Processing document..."):
+                with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(uploaded_file.name)[-1]) as tmp:
+                    tmp.write(uploaded_file.getvalue())
+                    tmp_path = tmp.name
+                
+                try:
+                    # BUG FIX: Pass the chunk_size and chunk_overlap to the cached function.
+                    st.session_state.vector_store = create_vector_store_cached(
+                        file_hash, chunk_size, chunk_overlap, tmp_path
+                    )
+                    st.session_state.uploaded_file_hash = file_hash
+                    processing_time = time.time() - start_time
+                    st.sidebar.success(f"Document processed in {processing_time:.2f} seconds.")
+                except Exception as e:
+                    st.sidebar.error(f"Error processing document: {e}")
+                    st.session_state.vector_store = None
+                    st.session_state.uploaded_file_hash = None
+                finally:
+                    if os.path.exists(tmp_path):
+                        os.remove(tmp_path)
 
 def display_final_sources(intermediate_steps):
     """Displays the final, cleaned-up sources after generation is complete."""
@@ -282,12 +288,9 @@ def handle_chat_interaction(prompt, llm, response_style, tts_enabled, web_search
         start_time = time.time()
         
         response_placeholder = st.empty()
-        
-        # Setup for live logging
         log_expander = st.expander("🤖 Live Thought Process...")
         log_placeholder = log_expander.empty()
         
-        # Interrupt button
         st.button("Stop Generation", key="stop_button", on_click=lambda: st.session_state.update(interrupt_generation=True))
 
         try:
@@ -298,10 +301,7 @@ def handle_chat_interaction(prompt, llm, response_style, tts_enabled, web_search
             
             stream_generator = stream_agent_response(agent_executor, prompt, callback_handler)
             
-            full_response = ""
-            log_messages = []
-            final_data = {}
-
+            full_response, log_messages, final_data = "", [], {}
             for chunk in stream_generator:
                 if "output" in chunk:
                     full_response += chunk["output"]
@@ -340,7 +340,6 @@ def handle_chat_interaction(prompt, llm, response_style, tts_enabled, web_search
             st.session_state.messages.append(AIMessage(content=error_message))
         finally:
             st.session_state.is_generating = False
-            # Rerun to clear the "Stop" button and "Live Log" expander
             st.rerun()
 
 
@@ -349,24 +348,4 @@ def main():
     """Main function to run the Streamlit app."""
     st.title("🤖 Basic Bot")
 
-    provider, model_name, temperature, response_style, tts_enabled, uploaded_file, web_search_only = render_sidebar()
-    
-    handle_document_upload(uploaded_file)
-
-    # Display chat history from session state
-    for message in st.session_state.messages:
-        role = "assistant" if isinstance(message, AIMessage) else "user"
-        with st.chat_message(role):
-            st.markdown(message.content)
-
-    if st.session_state.is_generating:
-        st.chat_input("Ask your question here...", disabled=True)
-    elif prompt := st.chat_input("Ask your question here..."):
-        try:
-            llm = get_llm(provider, model_name, temperature)
-            handle_chat_interaction(prompt, llm, response_style, tts_enabled, web_search_only)
-        except Exception as e:
-            st.error(f"Failed to initialize the language model: {e}")
-
-if __name__ == "__main__":
-    main()
+    # BUG FIX: Get chunk_size and chunk
