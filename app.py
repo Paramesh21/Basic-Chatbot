@@ -25,6 +25,8 @@ from typing import Generator
 from langchain_core.messages import AIMessage, HumanMessage
 from langchain.agents import create_react_agent, AgentExecutor
 from langchain.tools import Tool
+# FIX: Import ConversationBufferWindowMemory
+from langchain.memory import ConversationBufferWindowMemory
 from langchain_community.tools.tavily_search import TavilySearchResults
 from langchain import hub
 from gtts import gTTS
@@ -59,7 +61,11 @@ def initialize_session_state():
         "messages": [],
         "vector_store": None,
         "uploaded_file_hash": None,
-        "final_response_data": None
+        "final_response_data": None,
+        # FIX: Add memory to session state
+        "memory": ConversationBufferWindowMemory(
+            k=5, return_messages=True, memory_key="chat_history", output_key="output"
+        )
     }
     for key, value in defaults.items():
         st.session_state.setdefault(key, value)
@@ -73,12 +79,11 @@ def load_embedding_model():
     return get_embedding_model()
 
 
-# --- Agent & Tool Creation (REFINED FOR BUG FIX) ---
-def create_agent_executor(llm, response_style, vector_store=None, web_search_only=False):
-    """Creates a more robust LangChain agent and executor."""
+# --- Agent & Tool Creation ---
+def create_agent_executor(llm, response_style, memory, vector_store=None, web_search_only=False):
+    """Creates a more robust LangChain agent and executor with memory."""
     tools = []
     
-    # Tool descriptions are critical for the agent's decision-making.
     if not web_search_only and vector_store:
         retriever = vector_store.as_retriever()
         tools.append(Tool(
@@ -93,50 +98,30 @@ def create_agent_executor(llm, response_style, vector_store=None, web_search_onl
         tavily_tool.description = "A general web search engine. Use this ONLY if the document_search tool fails to find a relevant answer."
         tools.append(tavily_tool)
 
-    # This prompt template is heavily modified to force the agent to use the document first.
-    prompt_template = """
-    You are a helpful assistant. You have access to the following tools: {tools}
+    prompt = hub.pull("hwchase17/react")
     
-    Use the following format:
-    Thought: Do I need to use a tool? Yes
-    Action: The action to take, should be one of [{tool_names}]
-    Action Input: The input to the action
-    Observation: The result of the action
+    tool_instructions = "You have access to a web 'search' tool."
+    if not web_search_only and vector_store:
+        tool_instructions = "You MUST prioritize using the `document_search` tool for questions about the uploaded document."
 
-    When you have a response to say to the Human, or if you do not need to use a tool, you MUST use the format:
-    Thought: Do I need to use a tool? No
-    Final Answer: [your response here]
-
-    **CRITICAL INSTRUCTIONS:**
-    1.  **Prioritize the Document**: If the `document_search` tool is available, you **MUST** use it as your first action for any user query.
-    2.  **Analyze Document Output**: After using `document_search`, carefully analyze the 'Observation'. If it contains the answer, formulate your 'Final Answer' based **only** on that information.
-    3.  **Use Web Search as a Fallback**: You are only permitted to use the `search` tool if the `document_search` observation is empty or clearly does not contain the answer.
-
-    RESPONSE STYLE: {response_style}
-
-    Begin!
-
-    Previous conversation history:
-    {chat_history}
-
-    New input: {input}
-    {agent_scratchpad}
-    """
-    
-    prompt = hub.pull("hwchase17/react").partial(
-        template=prompt_template,
-        response_style="Respond in a detailed, multi-paragraph format." if response_style == "Detailed" else "Respond concisely, in 3 sentences or less."
+    prompt.template = prompt.template.replace(
+        "Think about what to do.",
+        f"Think about what to do. {tool_instructions}"
     )
+    
+    style = "Respond in a detailed, multi-paragraph format." if response_style == "Detailed" else "Respond concisely, in 3 sentences or less."
+    prompt = prompt.partial(response_style=style)
 
     agent = create_react_agent(llm, tools, prompt)
     
     return AgentExecutor(
         agent=agent,
         tools=tools,
+        memory=memory, # FIX: Pass memory to the agent executor
         verbose=True,
         handle_parsing_errors="I had trouble understanding that. Could you please rephrase?",
         return_intermediate_steps=True,
-        max_iterations=15, # Reduced to prevent long loops on failure
+        max_iterations=15,
         early_stopping_method="generate"
     )
 
@@ -199,7 +184,7 @@ def handle_document_upload(uploaded_file):
             except Exception as e:
                 st.sidebar.error(f"Error processing document: {e}")
                 st.session_state.vector_store = None
-                st.session_state.uploaded_file_hash = None # Clear hash on failure
+                st.session_state.uploaded_file_hash = None
             finally:
                 if os.path.exists(tmp_path):
                     os.remove(tmp_path)
@@ -225,52 +210,37 @@ def display_sources(intermediate_steps):
                 st.markdown("**Observation:**")
                 st.info(str(observation))
 
-def stream_agent_response(agent_executor, prompt) -> Generator:
-    """Streams the agent's response and yields the output and intermediate steps."""
-    full_response = ""
-    intermediate_steps = []
-
-    for chunk in agent_executor.stream({"input": prompt, "chat_history": st.session_state.messages}):
-        if "output" in chunk:
-            output_chunk = chunk["output"]
-            full_response += output_chunk
-            yield {"output": output_chunk}
-        elif "intermediate_steps" in chunk:
-            intermediate_steps = chunk["intermediate_steps"]
-    
-    yield {"full_response": full_response, "intermediate_steps": intermediate_steps}
-
 def handle_chat_interaction(prompt, llm, response_style, tts_enabled, web_search_only):
     """Handles the user's chat prompt, invokes the agent, and displays the response."""
+    # Append user message to the visual chat history
     st.session_state.messages.append(HumanMessage(content=prompt))
+    
     with st.chat_message("user"):
         st.markdown(prompt)
 
     with st.chat_message("assistant"):
         start_time = time.time()
         try:
-            agent_executor = create_agent_executor(llm, response_style, st.session_state.vector_store, web_search_only)
+            # Use the memory from session state
+            agent_executor = create_agent_executor(
+                llm, response_style, st.session_state.memory, st.session_state.vector_store, web_search_only
+            )
             
             response_placeholder = st.empty()
             
-            stream_generator = stream_agent_response(agent_executor, prompt)
+            # The agent will now automatically use the history from memory
+            response = agent_executor.invoke({"input": prompt})
             
-            full_response = ""
-            for chunk in stream_generator:
-                if "output" in chunk:
-                    full_response += chunk["output"]
-                    response_placeholder.markdown(full_response + "▌")
-                else:
-                    st.session_state.final_response_data = chunk
+            full_response = response.get("output", "An error occurred.")
             response_placeholder.markdown(full_response)
             
             response_time = time.time() - start_time
             st.caption(f"Response generated in {response_time:.2f} seconds.")
 
-            final_data = st.session_state.get("final_response_data", {})
-            intermediate_steps = final_data.get("intermediate_steps", [])
-            
+            # Append AI message to the visual chat history
             st.session_state.messages.append(AIMessage(content=full_response))
+            
+            intermediate_steps = response.get("intermediate_steps", [])
             display_sources(intermediate_steps)
 
             if tts_enabled and full_response:
@@ -301,7 +271,9 @@ def main():
     
     handle_document_upload(uploaded_file)
 
-    for message in st.session_state.messages:
+    # Load messages from memory for display
+    chat_history = st.session_state.memory.load_memory_variables({}).get("chat_history", [])
+    for message in chat_history:
         role = "assistant" if isinstance(message, AIMessage) else "user"
         with st.chat_message(role):
             st.markdown(message.content)
@@ -310,6 +282,8 @@ def main():
         try:
             llm = get_llm(provider, model_name, temperature)
             handle_chat_interaction(prompt, llm, response_style, tts_enabled, web_search_only)
+            # Rerun to display the new message from memory
+            st.rerun()
         except Exception as e:
             st.error(f"Failed to initialize the language model: {e}")
 
