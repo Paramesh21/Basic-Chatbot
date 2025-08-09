@@ -11,7 +11,8 @@ langchain-core==0.2.9
 langchain-community==0.2.4
 langchain-groq==0.1.5
 langchain-openai==0.1.8
-langchain-google-genai==0.1.5
+# FIX: Updated to a valid and compatible version
+langchain-google-genai==1.0.5
 langchain-huggingface==0.0.3
 langchainhub==0.1.20
 
