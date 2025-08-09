@@ -1,6 +1,5 @@
-swig
-build-essential
 # packages.txt
+
 freeglut3-dev
 libgtk2.0-0
 libgl1-mesa-glx
