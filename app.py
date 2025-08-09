@@ -79,6 +79,7 @@ def initialize_session_state():
         "uploaded_file_hash": None,
         "is_generating": False,
         "interrupt_generation": False,
+        "tts_enabled": False,
         "memory": ConversationBufferWindowMemory(
             k=5, return_messages=True, memory_key="chat_history", output_key="output"
         )
