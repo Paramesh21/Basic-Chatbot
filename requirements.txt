@@ -1,3 +1,5 @@
+# requirements.txt
+
 # Core Frameworks
 streamlit==1.36.0
 python-dotenv==1.0.1
@@ -21,7 +23,8 @@ unstructured[pdf]==0.14.8
 pdfminer.six==20221105
 opencv-python-headless==4.9.0.80
 nltk==3.8.1
-certifi==2.4.7.4
+# FIX: Corrected the typo in the version number
+certifi==2024.7.4
 
 # Tools & Utilities
 tavily-python==0.3.3
