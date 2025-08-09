@@ -1,5 +1,3 @@
-# requirements.txt
-
 # Core Frameworks
 streamlit==1.36.0
 python-dotenv==1.0.1
@@ -11,7 +9,6 @@ langchain-core==0.2.9
 langchain-community==0.2.4
 langchain-groq==0.1.5
 langchain-openai==0.1.8
-# FIX: Updated to a valid and compatible version
 langchain-google-genai==1.0.5
 langchain-huggingface==0.0.3
 langchainhub==0.1.20
@@ -29,6 +26,4 @@ certifi==2.4.7.4
 # Tools & Utilities
 tavily-python==0.3.3
 gtts==2.5.1
-# FIX: Pin rich to a version compatible with Streamlit
 rich==13.7.1
-pip install --upgrade pip
