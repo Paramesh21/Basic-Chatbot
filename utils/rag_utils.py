@@ -5,7 +5,8 @@ from langchain_community.vectorstores import Chroma
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_community.document_loaders import UnstructuredFileLoader
 
-def create_vector_store_from_upload(uploaded_file_path: str, embeddings):
+# BUG FIX: Added chunk_size and chunk_overlap to the function signature
+def create_vector_store_from_upload(uploaded_file_path: str, chunk_size: int, chunk_overlap: int, embeddings):
     """
     Creates a Chroma vector store from a file path.
     """
@@ -19,7 +20,8 @@ def create_vector_store_from_upload(uploaded_file_path: str, embeddings):
         if not documents:
             raise ValueError("The document is empty or could not be loaded.")
 
-        text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
+        # BUG FIX: Use the passed-in chunk_size and chunk_overlap instead of hardcoded values
+        text_splitter = RecursiveCharacterTextSplitter(chunk_size=chunk_size, chunk_overlap=chunk_overlap)
         chunks = text_splitter.split_documents(documents)
 
         return Chroma.from_documents(documents=chunks, embedding=embeddings)
