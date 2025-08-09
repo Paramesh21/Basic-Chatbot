@@ -158,7 +158,7 @@ def render_sidebar():
             st.stop()
         
         provider = st.selectbox("LLM Provider", available_providers)
-        model_name = st.selectbox("Model", PROVIDER_MAP[provider]["models"])
+        model_name = st.selectbox("Model", PROVIDER_MAP.get(provider, {}).get("models", []))
         temperature = st.slider("Temperature", 0.0, 1.0, 0.7, 0.05)
         
         st.divider()
@@ -175,10 +175,10 @@ def render_sidebar():
         st.divider()
         st.header("Interface")
         response_style = st.radio("Response Style", ["Concise", "Detailed"], horizontal=True)
-        tts_enabled = st.toggle("Enable Voice Reader 📢", value=False)
+        tts_enabled = st.toggle("Enable Voice Reader 📢", value=st.session_state.tts_enabled)
         
         st.divider()
-        if st.button("🗑️ Clear Chat History", use_container_width=True):
+        if st.button("🗑️ Clear Chat History", use_container_width=True, type="primary"):
             st.session_state.clear()
             st.rerun()
 
@@ -193,12 +193,14 @@ def handle_document_upload(uploaded_file):
         with st.spinner("📄 Processing document..."):
             with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(uploaded_file.name)[-1]) as tmp:
                 tmp.write(uploaded_file.getvalue())
-                tmp_path = tmp.name
+                st.session_state.uploaded_file_path = tmp.name
+            st.session_state.uploaded_file_hash = hashlib.md5(uploaded_file.getvalue()).hexdigest()
             
             try:
-                embeddings = load_embedding_model()
-                st.session_state.vector_store = create_vector_store_from_upload(tmp_path, embeddings)
-                st.session_state.uploaded_file_hash = hashlib.md5(uploaded_file.getvalue()).hexdigest()
+                embeddings = get_embeddings_model_cached()
+                st.session_state.vector_store = create_vector_store_cached(
+                    st.session_state.uploaded_file_hash, 1000, 200, st.session_state.uploaded_file_path
+                )
                 processing_time = time.time() - start_time
                 st.sidebar.success(f"Document processed in {processing_time:.2f} seconds.")
             except Exception as e:
@@ -206,8 +208,17 @@ def handle_document_upload(uploaded_file):
                 st.session_state.vector_store = None
                 st.session_state.uploaded_file_hash = None
             finally:
-                if os.path.exists(tmp_path):
-                    os.remove(tmp_path)
+                if 'uploaded_file_path' in st.session_state and os.path.exists(st.session_state.uploaded_file_path):
+                    os.remove(st.session_state.uploaded_file_path)
+
+@st.cache_data(max_entries=5, ttl=3600, show_spinner="Creating vector store...")
+def create_vector_store_cached(_file_hash, chunk_size, chunk_overlap, uploaded_file_path):
+    try:
+        embeddings = get_embeddings_model_cached()
+        return create_vector_store_from_upload(uploaded_file_path, chunk_size, chunk_overlap, embeddings)
+    except Exception as e:
+        st.error(f"Failed to create vector store: {e}")
+        return None
 
 def display_final_sources(intermediate_steps):
     """Displays the final, cleaned-up sources after generation is complete."""
