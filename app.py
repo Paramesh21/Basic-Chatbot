@@ -79,6 +79,8 @@ def initialize_session_state():
         "uploaded_file_hash": None,
         "is_generating": False,
         "interrupt_generation": False,
+        # BUG FIX: Added 'tts_enabled' to prevent AttributeError on first run.
+        "tts_enabled": False,
         "memory": ConversationBufferWindowMemory(
             k=5, return_messages=True, memory_key="chat_history", output_key="output"
         )
@@ -179,6 +181,7 @@ def render_sidebar():
         
         st.divider()
         if st.button("🗑️ Clear Chat History", use_container_width=True, type="primary"):
+            # BUG FIX: Clear all session state keys, not just messages and memory
             st.session_state.clear()
             st.rerun()
 
@@ -197,7 +200,8 @@ def handle_document_upload(uploaded_file):
             st.session_state.uploaded_file_hash = hashlib.md5(uploaded_file.getvalue()).hexdigest()
             
             try:
-                embeddings = get_embeddings_model_cached()
+                # BUG FIX: Renamed function from get_embeddings_model_cached to the correct load_embedding_model.
+                embeddings = load_embedding_model()
                 st.session_state.vector_store = create_vector_store_cached(
                     st.session_state.uploaded_file_hash, 1000, 200, st.session_state.uploaded_file_path
                 )
@@ -214,7 +218,8 @@ def handle_document_upload(uploaded_file):
 @st.cache_data(max_entries=5, ttl=3600, show_spinner="Creating vector store...")
 def create_vector_store_cached(_file_hash, chunk_size, chunk_overlap, uploaded_file_path):
     try:
-        embeddings = get_embeddings_model_cached()
+        # BUG FIX: Renamed function from get_embeddings_model_cached to the correct load_embedding_model.
+        embeddings = load_embedding_model()
         return create_vector_store_from_upload(uploaded_file_path, chunk_size, chunk_overlap, embeddings)
     except Exception as e:
         st.error(f"Failed to create vector store: {e}")
