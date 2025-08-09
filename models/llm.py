@@ -38,7 +38,6 @@ def get_llm(provider: str, model_name: str, temperature: float = 0.7):
         model_class = provider_info["class"]
         params = {"temperature": temperature}
         
-        # FIX: Use 'model' for Gemini and 'model_name' for others
         if provider == "Google Gemini":
             params["model"] = model_name
             params["google_api_key"] = provider_info["key"]
