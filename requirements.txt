@@ -19,7 +19,6 @@ langchainhub==0.1.20
 chromadb==0.5.3
 pypdf==4.2.0
 python-docx==1.1.2
-# FIX: Added [pdf] to install necessary dependencies for PDF processing
 unstructured[pdf]==0.14.8
 nltk==3.8.1
 certifi==2024.7.4
